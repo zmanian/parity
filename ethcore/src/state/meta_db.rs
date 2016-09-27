@@ -17,23 +17,63 @@
 //! Account meta-database.
 //!
 //! This is a journalled database which stores information on accounts.
-//! The key-value mapping is Address -> [code_size, code_hash] where
-//! the value is an rlp-encoded list of two items.
+//! The instance of `MetaDB` can be pointed towards a specific branch in its journal.
+//! Queries for account data will only succeed if they are present in that branch or
+//! the backing database.
 //!
-//! We can set the meta-db to track a given branch, and to reorganize
-//! efficiently to a different branch.
+//! The journal format is two-part. First, for every era we store a list of
+//! candidate hashes.
+//!
+//! For each hash, we store a list of changes in that candidate.
 
 use util::{Address, H160, H256, U256};
 use util::kvdb::{Database, DBTransaction};
-use rlp::{RlpDecodable, RlpEncodable, RlpStream, Stream, Rlp, View};
+use rlp::{Decoder, DecoderError, RlpDecodable, RlpEncodable, RlpStream, Stream, Rlp, View};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
+
+const PADDING: [u8; 10] = [0; 10];
+
+// generate a key for the given era.
+fn journal_key(era: &u64) -> Vec<u8> {
+	let mut stream = RlpStream::new_list(3);
+	stream.append(&"journal").append(era).append(&&PADDING[..]);
+	stream.out()
+}
+
+// generate a key for the given id.
+fn id_key(id: &H256) -> Vec<u8> {
+	let mut stream = RlpStream::new_list(3);
+	stream.append(&"journal").append(id).append(&&PADDING[..]);
+	stream.out()
+}
 
 // deltas in the journal -- these don't contain data for simple rollbacks.
 enum JournalDelta {
 	Destroy,
 	Set(AccountMeta),
+}
+
+impl RlpEncodable for JournalDelta {
+	fn rlp_append(&self, s: &mut RlpStream) {
+		s.begin_list(2);
+		match *self {
+			JournalDelta::Destroy => s.append(&false).append_empty_data(),
+			JournalDelta::Set(ref meta) => s.append(&true).append(meta),
+		};
+	}
+}
+
+impl RlpDecodable for JournalDelta {
+	fn decode<D>(decoder: &D) -> Result<Self, DecoderError> where D: Decoder {
+		let rlp = decoder.as_rlp();
+
+		Ok(match try!(rlp.val_at::<bool>(0)) {
+			true => JournalDelta::Set(try!(rlp.val_at(1))),
+			false => JournalDelta::Destroy,
+		})
+	}
 }
 
 // deltas in the branch view -- these contain data making it simple to
@@ -70,30 +110,28 @@ pub struct AccountMeta {
 	pub nonce: U256,
 }
 
-impl AccountMeta {
-	// stream the meta info to RLP.
-	fn stream_rlp(&self) -> Vec<u8> {
-		let mut stream = RlpStream::new_list(5);
-		stream
+impl RlpEncodable for AccountMeta {
+	fn rlp_append(&self, s: &mut RlpStream) {
+		s.begin_list(5)
 			.append(&self.code_size)
 			.append(&self.code_hash)
 			.append(&self.storage_root)
 			.append(&self.balance)
 			.append(&self.nonce);
-		stream.out()
 	}
+}
 
-	// build the meta information from (trusted) RLP.
-	fn from_rlp(bytes: &[u8]) -> Self {
-		let rlp = Rlp::new(bytes);
+impl RlpDecodable for AccountMeta {
+	fn decode<D>(decoder: &D) -> Result<Self, DecoderError> where D: Decoder {
+		let rlp = decoder.as_rlp();
 
-		AccountMeta {
-			code_size: rlp.val_at(0),
-			code_hash: rlp.val_at(1),
-			storage_root: rlp.val_at(2),
-			balance: rlp.val_at(3),
-			nonce: rlp.val_at(4),
-		}
+		Ok(AccountMeta {
+			code_size: try!(rlp.val_at(0)),
+			code_hash: try!(rlp.val_at(1)),
+			storage_root: try!(rlp.val_at(2)),
+			balance: try!(rlp.val_at(3)),
+			nonce: try!(rlp.val_at(4)),
+		})
 	}
 }
 
@@ -101,7 +139,36 @@ impl AccountMeta {
 struct Journal {
 	// maps block numbers (or more abstractly, eras) to potential canonical meta info.
 	entries: BTreeMap<u64, HashMap<H256, JournalEntry>>,
-	last_committed: H256,
+}
+
+impl Journal {
+	// read the journal from the database, starting from the last committed
+	// era.
+	fn read_from(db: &Database, col: Option<u32>, era: u64) -> Result<Self, String> {
+		let mut journal = Journal {
+			entries: BTreeMap::new(),
+		};
+
+		let mut era = era + 1;
+		while let Some(hashes) = try!(db.get(col, &journal_key(&era))).map(|x| ::rlp::decode::<Vec<H256>>(&x)) {
+			let candidates: Result<HashMap<_, _>, String> = hashes.into_iter().map(|hash| {
+				let journal_rlp = try!(db.get(col, &id_key(&hash)))
+					.expect(&format!("corrupted database: missing journal data for {}.", hash));
+
+				let rlp = Rlp::new(&journal_rlp);
+
+				Ok((hash, JournalEntry {
+					parent: rlp.val_at(0),
+					entries: rlp.at(1).iter().map(|e| (e.val_at(0), e.val_at(1))).collect(),
+				}))
+			}).collect();
+
+			journal.entries.insert(era, try!(candidates));
+			era += 1;
+		}
+
+		Ok(journal)
+	}
 }
 
 // Each journal entry stores the parent hash of the block it corresponds to
@@ -159,11 +226,38 @@ impl MetaDB {
 			.map(|&(ref addr, ref delta)| (addr.clone(), delta.into()))
 			.collect();
 
+		// write out the new journal entry.
+		{
+			let key = id_key(&id);
+			let mut stream = RlpStream::new_list(2);
+			stream.append(&parent_id);
+			stream.begin_list(pending.len());
+
+			for &(ref addr, ref delta) in pending.iter() {
+				stream.begin_list(2);
+				stream.append(addr).append(delta);
+			}
+
+			batch.put_vec(self.col, &key, stream.out());
+		}
+
 		self.branch.accrue(id);
-		self.journal.entries.entry(now).or_insert_with(HashMap::new).insert(id, JournalEntry {
-			parent: parent_id,
-			entries: pending,
-		});
+		let candidates: Vec<H256> = {
+			let entries = self.journal.entries.entry(now).or_insert_with(HashMap::new);
+			entries.insert(id, JournalEntry {
+				parent: parent_id,
+				entries: pending,
+			});
+
+			entries.keys().cloned().collect()
+		};
+
+
+		// write out the new ids key.
+		{
+			let key = journal_key(&now);
+			batch.put_vec(self.col, &key, ::rlp::encode(&candidates).to_vec());
+		}
 	}
 
 	/// Mark an era as canonical. May invalidate the current branch view.
@@ -182,12 +276,7 @@ impl MetaDB {
 
 		// TODO: delete old branches building off of invalidated candidates.
 		for (id, entry) in entries {
-			let key = {
-				let mut stream = RlpStream::new_list(2);
-				stream.append(&end_era).append(&id);
-				stream.drain()
-			};
-
+			let key = id_key(&id);
 			batch.delete(self.col, &key[..]);
 
 			if id == canon_id {
@@ -195,11 +284,15 @@ impl MetaDB {
 					match delta {
 						JournalDelta::Destroy => batch.delete(self.col, &*address),
 						JournalDelta::Set(meta) =>
-							batch.put_vec(self.col, &*address, meta.stream_rlp()),
+							batch.put_vec(self.col, &*address, ::rlp::encode(&meta).to_vec()),
 					}
 				}
 			}
 		}
+
+		// remove the list of hashes.
+		let key = journal_key(&end_era);
+		batch.delete(self.col, &key[..]);
 
 		self.last_committed = (canon_id, end_era);
 
@@ -208,6 +301,12 @@ impl MetaDB {
 		if !self.branch.remove_ancient(&canon_id) {
 			self.clear_branch();
 		}
+
+		{
+			let mut stream = RlpStream::new_list(2);
+			stream.append(&self.last_committed.0).append(&self.last_committed.1);
+			batch.put_vec(self.col, b"latest", stream.out())
+		}
 	}
 
 	/// Query the state of an account. A return value
@@ -215,7 +314,7 @@ impl MetaDB {
 	pub fn get(&self, address: &Address) -> Option<AccountMeta> {
 		self.branch.overlay.get(address).map(|o| o.clone()).unwrap_or_else(|| {
 			match self.db.get(self.col, &*address) {
-				Ok(maybe) => maybe.map(|raw| AccountMeta::from_rlp(&raw)),
+				Ok(maybe) => maybe.map(|x| ::rlp::decode(&x)),
 				Err(e) => {
 					warn!("Low-level database error: {}", e);
 					None
@@ -405,7 +504,7 @@ impl MetaBranch {
 
 			let prev: Option<AccountMeta> = self.overlay.get(addr).map(|o| o.clone()).unwrap_or_else(|| {
 				match db.get(col, &*addr) {
-					Ok(maybe_prev) => maybe_prev.map(|raw| AccountMeta::from_rlp(&raw)),
+					Ok(maybe_prev) => maybe_prev.map(|x| ::rlp::decode(&x)),
 					Err(e) => {
 						warn!("Low-level database error: {}", e);
 						None
