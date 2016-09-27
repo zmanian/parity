@@ -117,27 +117,31 @@ pub struct ReorgImpossible;
 /// It can't be queried without a `MetaBranch` which allows for accurate
 /// queries along the current branch.
 ///
-/// This has a short journal period, and is only usable while syncing.
-/// When replaying old transactions, it can't be used.
+/// This has a short journal period, and is only really usable while syncing.
+/// When replaying old transactions, it can't be used safely.
 #[derive(Debug, Clone)]
 pub struct MetaDB {
 	col: Option<u32>,
 	db: Arc<Database>,
 	journal: Journal,
-	last_committed: H256,
+	latest_era: (H256, u64), // last committed era.
 	branch: MetaBranch, // current branch.
 }
 
 impl MetaDB {
 	/// Create a new `MetaDB` from a database and column. This will also load the journal.
 	pub fn new(db: Arc<Database>, col: Option<u32>) -> Result<Self, String> {
+		let latest_era = unimplemented!();
+
 		let db = MetaDB {
 			col: col,
 			db: db,
 			journal: unimplemented!(), // todo: load and save journal.
+			latest_era: latest_era.clone(),
 			branch: MetaBranch {
 				ancestors: VecDeque::new(),
 				current_changes: Vec::new(),
+				era: latest_era.1,
 				overlay: HashMap::new(),
 				recent: HashMap::new(),
 			}
@@ -194,18 +198,13 @@ impl MetaDB {
 		// prune the branch view and reset it if it's based off a non-canonical
 		// block.
 		if !self.branch.remove_ancient(&canon_id) {
-			self.branch = MetaBranch {
-				ancestors: VecDeque::new(),
-				current_changes: Vec::new(),
-				overlay: HashMap::new(),
-				recent: HashMap::new(),
-			}
+			self.clear_branch();
 		}
 	}
 
-	/// Query the meta state for an account. A return value
-	/// of none means that the account does not exist on this branch.
-	pub fn meta(&self, address: &Address) -> Option<AccountMeta> {
+	/// Query the state of an account. A return value
+	/// of `None` means that the account does not exist on this branch.
+	pub fn get(&self, address: &Address) -> Option<AccountMeta> {
 		self.branch.overlay.get(address).or_else(|| {
 			match self.database.get(address) {
 				Ok(maybe) => maybe.map(::rlp::decode),
@@ -220,15 +219,87 @@ impl MetaDB {
 	/// Set the head to the requested branch.
 	/// The block must be in the journal already.
 	///
-	/// Will fail if the branch is older than the journal.
-	pub fn set_branch(&mut self, hash: H256, new_era: u64) -> Result<(), ReorgImpossible> {
-		let entry = try!(self.journal.entries.get(new_era))
+	/// Will fail if the common ancestor and both branches aren't in the journal.
+	/// This shouldn't be possible for anything within the history period.
+	///
+	/// Note that this will point to the meta state at the point immediately
+	/// after the given id.
+	///
+	/// On failure, branch state is undefined and must be set to a possible
+	/// branch before continued use.
+	pub fn branch_to(&mut self, hash: H256, new_era: u64) -> Result<(), ReorgImpossible> {
+		if new_era == self.latest_era.1 {
+			self.clear_branch();
 
-		// nothing to do here!
+			return if hash != self.latest_era.0 {
+				Err(ReorgImpossible);
+			} else {
+				Ok(())
+			}
+		}
+
+		// check for equivalent branch.
 		let branch_head = self.branch.ancestors.last()
 			.map_or_else(|| &self.last_committed, |&(ref h, _)| h);
 
-		if new_era == self.branch.era && branch_head == &hash { return }
+		let mut to_era = new_era;
+		let mut to_branch = vec![];
+		let mut ancestor_hash = hash.clone();
+
+		if new_era == self.branch.era && branch_head == &hash { return Ok(()) }
+
+		let journal_entry = |era, id|
+			self.journal.entries.get(era)
+				.and_then(|entries| entries.get(id)).ok_or(ReorgImpossible);
+
+		// reset to same level by rolling back the branch
+		while self.branch.latest_era() > to_era {
+			// protected by check above.
+			self.branch.rollback().expect("branch known to have enough journalled ancestors; qed");
+		}
+
+		while to_era > self.branch.latest_era() {
+			let entry = try!(journal_entry(&to_era, &ancestor_hash));
+
+			to_branch.push(ancestor_hash);
+			ancestor_hash = entry.parent;
+			to_era -= 1;
+		}
+
+		// rewind the branch until we find a common ancestor
+		while try!(self.branch.latest_id().ok_or(ReorgImpossible)) != ancestor_hash {
+			try!(self.branch.rollback().ok_or(ReorgImpossible));
+
+			let entry = try!(journal_entry(&to_era, &ancestor_hash));
+
+			to_branch.push(ancestor_hash);
+			ancestor_hash = entry.parent;
+			to_era -= 1;
+		}
+
+		self.branch.clear(); // clear the current changes overlay before proceeding.
+
+		// and then walk forward, accruing all of the fork branch's changes into
+		// the branch.
+		for (era, id) in (to_era..new_era).zip(to_era.into_iter().rev()) {
+			let entry = journal_entry(&era, &id).expect("this entry fetched previously; qed");
+
+			self.branch.accrue_journal(id, &entry.entries, &*self.db, self.col);
+		}
+
+		assert_eq!(self.branch.latest_era(), new_era);
+		assert_eq!(self.branch.latest_id(), Some(hash))
+	}
+
+	// set the branch to completely empty.
+	fn clear_branch(&mut self) {
+		self.branch = MetaBranch {
+			ancestors: VecDeque::new(),
+			current_changes: Vec::new(),
+			era: self.latest_era.1,
+			overlay: HashMap::new(),
+			recent: HashMap::new(),
+		};
 	}
 }
 
@@ -251,9 +322,28 @@ struct MetaBranch {
 }
 
 impl MetaBranch {
+	// latest tracked era.
+	fn latest_era(&self) -> u64 {
+		self.era
+	}
+
+	// latest tracked id.
+	fn latest_id(&self) -> Option<&H256> {
+		self.ancestors.last().map(|&(ref hash, _)| hash)
+	}
+
+	// clear current changes.
+	fn clear_current(&mut self) {
+		self.current_changes.clear()
+	}
+
 	// Roll back current changes and pop an ancestor. Returns the hash
 	// of the ancestor just popped, or none if there isn't one.
+	//
+	// replaces the current changes with those of the popped ancestor.
 	fn rollback(&mut self) -> Option<H256> {
+		use std::collections::hash_map::Entry;
+
 		// process changes in reverse for proper backtracking.
 		for (address, delta) in self.current_changes.drain(..).rev() {
 			match delta {
@@ -265,7 +355,9 @@ impl MetaBranch {
 
 		match self.ancestors.pop_back() {
 			Some((hash, delta)) => {
-				for
+				self.era -= 1;
+				self.prune_recent(delta.iter().map(|&(ref addr, _)| addr).cloned());
+
 				self.current_changes = delta;
 				Some(hash)
 			}
@@ -324,7 +416,24 @@ impl MetaBranch {
 			deltas.push(delta);
 		}
 
+		self.era += 1;
 		self.ancestors.push_back(hash, deltas);
+	}
+
+	// decrement the refcount in `recent` for any address in the given
+	// iterable.
+	fn prune_recent<I>(&mut self, iter: I) where I: IntoIterator<Item=Address> {
+		for addr in iter {
+			match self.recent.entry(addr) {
+				Entry::Occupied(x) {
+					*x.get_mut() -= 1;
+					if x.get() == 0 {
+						x.remove();
+					}
+				}
+				_ => {}
+			}
+		}
 	}
 
 	// get rid of the most ancient ancestor, and remove any stale entries from the overlay.
@@ -338,15 +447,9 @@ impl MetaBranch {
 			_ => return false;
 		};
 
-		for (addr, _) in deltas {
-			match self.recent.entry(addr) {
-				Entry::Occupied(x) if x.get() == 1 {
-					x.remove();
-				}
-				_ => {}
-			}
-		}
+		if self.ancestors.is_empty() { self.era -= 1 }
 
+		self.prune_recent(delta.into_iter().map(|(addr, _)| addr));
 		true
 	}
 }

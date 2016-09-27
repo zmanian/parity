@@ -26,9 +26,11 @@ use types::state_diff::StateDiff;
 
 mod account;
 mod substate;
+mod meta_db;
 
 pub use self::account::Account;
 pub use self::substate::Substate;
+pub use self::meta_db::MetaDB;
 
 /// Used to return information about an `State::apply` operation.
 pub struct ApplyOutcome {
