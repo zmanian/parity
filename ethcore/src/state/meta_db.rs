@@ -80,8 +80,7 @@ impl RlpDecodable for JournalDelta {
 // roll back.
 enum BranchDelta {
 	Destroy(AccountMeta),
-	Init(AccountMeta), // init over empty overlay and db
-	Reinit(AccountMeta), // init over unknown db, None overlay.
+	Init(AccountMeta),
 	Replace(AccountMeta, AccountMeta),
 }
 
@@ -89,8 +88,7 @@ impl<'a> From<&'a BranchDelta> for JournalDelta {
 	fn from(bd: &'a BranchDelta) -> Self {
 		match *bd {
 			BranchDelta::Destroy(_) => JournalDelta::Destroy,
-			BranchDelta::Init(ref new) | BranchDelta::Replace(ref new, _) | BranchDelta::Reinit(ref new)
-				=> JournalDelta::Set(new.clone()),
+			BranchDelta::Init(ref new) | BranchDelta::Replace(ref new, _) => JournalDelta::Set(new.clone()),
 		}
 	}
 }
@@ -198,14 +196,22 @@ pub struct MetaDB {
 
 impl MetaDB {
 	/// Create a new `MetaDB` from a database and column. This will also load the journal.
+	///
+	/// After creation, check the last committed era to see if the genesis state
+	/// is in. If not, it should be inserted, journalled, and marked canonical.
 	pub fn new(db: Arc<Database>, col: Option<u32>) -> Result<Self, String> {
-		// todo: get from db or initialize from genesis state.
-		let last_committed: (H256, u64) = unimplemented!();
+		let last_committed: (H256, u64) = try!(db.get(col, b"latest")).map(|raw| {
+			let rlp = Rlp::new(&raw);
 
-		let db = MetaDB {
+			(rlp.val_at(0), rlp.val_at(1))
+		}).unwrap_or_else(Default::default);
+
+		let journal = try!(Journal::read_from(&*db, col, last_committed.1));
+
+		Ok(MetaDB {
 			col: col,
 			db: db,
-			journal: unimplemented!(), // todo: load and save journal.
+			journal: journal,
 			last_committed: last_committed.clone(),
 			branch: MetaBranch {
 				ancestors: VecDeque::new(),
@@ -214,7 +220,7 @@ impl MetaDB {
 				overlay: HashMap::new(),
 				recent: HashMap::new(),
 			}
-		};
+		})
 	}
 
 	/// Journal all pending changes under the given era and id. Also updates
@@ -323,6 +329,42 @@ impl MetaDB {
 		})
 	}
 
+	/// Set the given account's details on this address.
+	/// This will completely overwrite any other entry.
+	pub fn set(&mut self, address: Address, meta: AccountMeta) {
+		self.mutate_or_create(address, |d| *d = meta.clone(), || meta.clone());
+	}
+
+	/// Destroy the account details here.
+	pub fn remove(&mut self, address: Address) {
+		if let Some(prev) = self.get(&address) {
+			self.branch.overlay.insert(address.clone(), None);
+			self.branch.current_changes.push((address, BranchDelta::Destroy(prev)));
+		}
+		// `None` shouldn't be strictly possible.
+	}
+
+	/// Mutate the current account details or create some as a fallback.
+	pub fn mutate_or_create<F, G>(&mut self, address: Address, mutate: F, default: G)
+		where F: FnOnce(&mut AccountMeta), G: FnOnce() -> AccountMeta
+	{
+		match self.get(&address) {
+			Some(prev) => {
+				let mut new = prev.clone();
+				mutate(&mut new);
+
+				self.branch.overlay.insert(address.clone(), Some(new.clone()));
+				self.branch.current_changes.push((address, BranchDelta::Replace(new, prev)));
+			}
+			None => {
+				let new = default();
+
+				self.branch.overlay.insert(address.clone(), Some(new.clone()));
+				self.branch.current_changes.push((address, BranchDelta::Init(new)));
+			}
+		}
+	}
+
 	/// Set the head to the requested branch.
 	/// The block must be in the journal already.
 	///
@@ -342,6 +384,9 @@ impl MetaDB {
 					.and_then(|entries| entries.get($id)).ok_or(ReorgImpossible)
 			}
 		}
+
+		// first things first, clear any uncommitted changes on the branch.
+		self.branch.clear_current();
 
 		if new_era == self.last_committed.1 {
 			self.clear_branch();
@@ -390,8 +435,6 @@ impl MetaDB {
 			ancestor_hash = entry.parent;
 			to_era -= 1;
 		}
-
-		self.branch.clear_current(); // clear the current changes overlay before proceeding.
 
 		// and then walk forward, accruing all of the fork branch's changes into
 		// the branch.
@@ -452,27 +495,26 @@ impl MetaBranch {
 		self.current_changes.clear()
 	}
 
-	// Roll back current changes and pop an ancestor. Returns the hash
+	// pop an ancestor and roll back its changes. Returns the hash
 	// of the ancestor just popped, or none if there isn't one.
-	//
-	// replaces the current changes with those of the popped ancestor.
 	fn rollback(&mut self) -> Option<H256> {
-		// process changes in reverse for proper backtracking.
-		for (address, delta) in self.current_changes.drain(..).rev() {
-			match delta {
-				BranchDelta::Destroy(prev) => self.overlay.insert(address, Some(prev)),
-				BranchDelta::Init(_) => self.overlay.remove(&address),
-				BranchDelta::Reinit(_) => self.overlay.insert(address, None),
-				BranchDelta::Replace(prev, _) => self.overlay.insert(address, Some(prev)),
-			};
-		}
-
 		match self.ancestors.pop_back() {
 			Some((hash, delta)) => {
 				self.era -= 1;
-				self.prune_recent(delta.iter().map(|&(ref addr, _)| addr).cloned());
 
-				self.current_changes = delta;
+				// process changes in reverse for proper backtracking.
+				for &(ref address, ref delta) in delta.iter().rev() {
+					match *delta {
+						BranchDelta::Destroy(ref prev) => self.overlay.insert(address.clone(), Some(prev.clone())),
+						BranchDelta::Init(_) => self.overlay.remove(address),
+						BranchDelta::Replace(ref prev, _) => self.overlay.insert(address.clone(), Some(prev.clone())),
+					};
+				}
+
+				// prune out anything that only this touched after the rollback,
+				// in case something from the backing database was restored.
+				self.prune_recent(delta.into_iter().map(|(addr, _)| addr));
+
 				Some(hash)
 			}
 			None => None,
@@ -524,12 +566,7 @@ impl MetaBranch {
 
 					match prev {
 						Some(prev) => BranchDelta::Replace(meta.clone(), prev),
-						None =>
-							if self.overlay.get(addr) == Some(&None) {
-								BranchDelta::Reinit(meta.clone())
-							} else {
-								BranchDelta::Init(meta.clone())
-							},
+						None => BranchDelta::Init(meta.clone()),
 					}
 				}
 			};
