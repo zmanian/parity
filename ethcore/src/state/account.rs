@@ -38,6 +38,8 @@ pub struct Account {
 	code_hash: Option<H256>,
 	// Code cache of the account.
 	code_cache: Bytes,
+	// Code size.
+	code_size: usize,
 	// Account is new or has been modified
 	filth: Filth,
 	// Cached address hash.
@@ -48,6 +50,7 @@ impl Account {
 	#[cfg(test)]
 	/// General constructor.
 	pub fn new(balance: U256, nonce: U256, storage: HashMap<H256, H256>, code: Bytes) -> Account {
+		let code_size = code.len();
 		Account {
 			balance: balance,
 			nonce: nonce,
@@ -55,6 +58,7 @@ impl Account {
 			storage_overlay: RefCell::new(storage.into_iter().map(|(k, v)| (k, (Filth::Dirty, v))).collect()),
 			code_hash: Some(code.sha3()),
 			code_cache: code,
+			code_size: code_size,
 			filth: Filth::Dirty,
 			address_hash: Cell::new(None),
 		}
@@ -69,6 +73,7 @@ impl Account {
 			storage_overlay: RefCell::new(pod.storage.into_iter().map(|(k, v)| (k, (Filth::Dirty, v))).collect()),
 			code_hash: pod.code.as_ref().map(|c| c.sha3()),
 			code_cache: pod.code.as_ref().map_or_else(|| { warn!("POD account with unknown code is being created! Assuming no code."); vec![] }, |c| c.clone()),
+			code_size: pod.code.as_ref().map_or(0, |c| c.len()),
 			filth: Filth::Dirty,
 			address_hash: Cell::new(None),
 		}
@@ -83,6 +88,7 @@ impl Account {
 			storage_overlay: RefCell::new(HashMap::new()),
 			code_hash: Some(SHA3_EMPTY),
 			code_cache: vec![],
+			code_size: 0,
 			filth: Filth::Dirty,
 			address_hash: Cell::new(None),
 		}
@@ -98,6 +104,7 @@ impl Account {
 			storage_overlay: RefCell::new(HashMap::new()),
 			code_hash: Some(r.val_at(3)),
 			code_cache: vec![],
+			code_size: 0,
 			filth: Filth::Clean,
 			address_hash: Cell::new(None),
 		}
@@ -113,6 +120,7 @@ impl Account {
 			storage_overlay: RefCell::new(HashMap::new()),
 			code_hash: None,
 			code_cache: vec![],
+			code_size: 0,
 			filth: Filth::Dirty,
 			address_hash: Cell::new(None),
 		}
@@ -122,6 +130,7 @@ impl Account {
 	/// NOTE: Account should have been created with `new_contract()`
 	pub fn init_code(&mut self, code: Bytes) {
 		assert!(self.code_hash.is_none());
+		self.code_size = code.len();
 		self.code_cache = code;
 		self.filth = Filth::Dirty;
 	}
@@ -196,12 +205,21 @@ impl Account {
 		}
 	}
 
+	/// returns the account's code size. If `None` then the code cache isn't available.
+	pub fn code_size(&self) -> Option<usize> {
+		match self.code_hash {
+			Some(c) if c != SHA3_EMPTY && self.code_cache.is_empty() => None,
+			_ => Some(self.code_size)
+		}
+	}
+
 	#[cfg(test)]
 	/// Provide a byte array which hashes to the `code_hash`. returns the hash as a result.
 	pub fn note_code(&mut self, code: Bytes) -> Result<(), H256> {
 		let h = code.sha3();
 		match self.code_hash {
 			Some(ref i) if h == *i => {
+				self.code_size = code.len();
 				self.code_cache = code;
 				Ok(())
 			},
@@ -231,7 +249,7 @@ impl Account {
 		self.is_cached() ||
 			match self.code_hash {
 				Some(ref h) => match db.get(h) {
-					Some(x) => { self.code_cache = x.to_vec(); true },
+					Some(x) => { self.code_cache = x.to_vec(); self.code_size = x.len(); true },
 					_ => {
 						warn!("Failed reverse get of {}", h);
 						false
