@@ -332,36 +332,26 @@ impl MetaDB {
 	/// Set the given account's details on this address.
 	/// This will completely overwrite any other entry.
 	pub fn set(&mut self, address: Address, meta: AccountMeta) {
-		self.mutate_or_create(address, |d| *d = meta.clone(), || meta.clone());
+		match self.get(&address) {
+			Some(prev) => {
+				self.branch.overlay.insert(address.clone(), Some(meta.clone()));
+				self.branch.current_changes.push((address, BranchDelta::Replace(meta, prev)));
+			}
+			None => {
+				self.branch.overlay.insert(address.clone(), Some(meta.clone()));
+				self.branch.current_changes.push((address, BranchDelta::Init(meta)));
+			}
+		}
 	}
 
 	/// Destroy the account details here.
 	pub fn remove(&mut self, address: Address) {
+		// `None` shouldn't be strictly possible, but we actually re-remove all
+		// accounts in the state cache which were just nonexistant at the time of
+		// query.
 		if let Some(prev) = self.get(&address) {
 			self.branch.overlay.insert(address.clone(), None);
 			self.branch.current_changes.push((address, BranchDelta::Destroy(prev)));
-		}
-		// `None` shouldn't be strictly possible.
-	}
-
-	/// Mutate the current account details or create some as a fallback.
-	pub fn mutate_or_create<F, G>(&mut self, address: Address, mutate: F, default: G)
-		where F: FnOnce(&mut AccountMeta), G: FnOnce() -> AccountMeta
-	{
-		match self.get(&address) {
-			Some(prev) => {
-				let mut new = prev.clone();
-				mutate(&mut new);
-
-				self.branch.overlay.insert(address.clone(), Some(new.clone()));
-				self.branch.current_changes.push((address, BranchDelta::Replace(new, prev)));
-			}
-			None => {
-				let new = default();
-
-				self.branch.overlay.insert(address.clone(), Some(new.clone()));
-				self.branch.current_changes.push((address, BranchDelta::Init(new)));
-			}
 		}
 	}
 

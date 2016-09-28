@@ -20,6 +20,7 @@ use std::collections::hash_map::Entry;
 use util::*;
 use pod_account::*;
 use rlp::*;
+use super::meta_db::{MetaDB, AccountMeta};
 
 use std::cell::{Ref, RefCell, Cell};
 
@@ -126,6 +127,21 @@ impl Account {
 		}
 	}
 
+	/// Create a new account from meta details.
+	pub fn from_meta(meta: AccountMeta) -> Account {
+		Account {
+			balance: meta.balance,
+			nonce: meta.nonce,
+			storage_root: meta.storage_root,
+			storage_overlay: RefCell::new(HashMap::new()),
+			code_hash: Some(meta.code_hash),
+			code_cache: vec![],
+			code_size: meta.code_size,
+			filth: Filth::Clean,
+			address_hash: Cell::new(None),
+		}
+	}
+
 	/// Set this account's code to the given code.
 	/// NOTE: Account should have been created with `new_contract()`
 	pub fn init_code(&mut self, code: Bytes) {
@@ -205,10 +221,10 @@ impl Account {
 		}
 	}
 
-	/// returns the account's code size. If `None` then the code cache isn't available.
+	/// returns the account's code size. If `None` then the code size cache isn't available.
 	pub fn code_size(&self) -> Option<usize> {
 		match self.code_hash {
-			Some(c) if c != SHA3_EMPTY && self.code_cache.is_empty() => None,
+			Some(c) if c != SHA3_EMPTY && self.code_size == 0 => None,
 			_ => Some(self.code_size)
 		}
 	}
@@ -326,6 +342,42 @@ impl Account {
 				self.code_hash = Some(db.insert(&self.code_cache));
 			},
 			(false, _) => {},
+		}
+	}
+
+	/// Commit the meta information. Assumes that `commit_code` and `commit_storage` have
+	/// already been called for correct behavior.
+	pub fn commit_meta(&self, address: Address, meta_db: &mut MetaDB) {
+		let code_hash = match self.code_hash.as_ref() {
+			Some(hash) => hash,
+			None => return, // precondition of `commit_code` not met.
+		};
+
+		match (code_hash == &SHA3_EMPTY, self.code_cache.is_empty()) {
+			(true, _) | (false, false) => {
+				// an account with no code or an account with cached code
+				// can both easily set all meta fields.
+				meta_db.set(address, AccountMeta {
+					nonce: self.nonce.clone(),
+					balance: self.balance.clone(),
+					storage_root: self.storage_root.clone(),
+					code_hash: code_hash.clone(),
+					code_size: self.code_size,
+				});
+			}
+			(false, true) => {
+				// account with no cached code should have a previous entry.
+				if let Some(mut prev) = meta_db.get(&address) {
+					// update all non-code entries. These should already be
+					// correct.
+					prev.nonce = self.nonce.clone();
+					prev.balance = self.balance.clone();
+					prev.storage_root = self.storage_root.clone();
+
+					meta_db.set(address, prev);
+				}
+				// if not, there's nothing to do here.
+			}
 		}
 	}
 
