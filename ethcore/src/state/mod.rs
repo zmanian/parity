@@ -227,7 +227,7 @@ impl State {
 	}
 
 	/// Destroy the current object and return root and database.
-	pub fn drop(self) -> (H256, StateDB, Option<MetaDB>) {
+	pub fn drop(mut self) -> (H256, StateDB, Option<MetaDB>) {
 		self.commit_cache();
 		(self.root, self.db, self.meta_db)
 	}
@@ -399,6 +399,7 @@ impl State {
 		db: &mut StateDB,
 		root: &mut H256,
 		accounts: &mut HashMap<Address, AccountEntry>,
+		mut meta_db: Option<&mut MetaDB>,
 	) -> Result<(), Error> {
 		// first, commit the sub trees.
 		// TODO: is this necessary or can we dispense with the `ref mut a` for just `a`?
@@ -409,6 +410,10 @@ impl State {
 					let mut account_db = factories.accountdb.create(db.as_hashdb_mut(), addr_hash);
 					account.commit_storage(&factories.trie, account_db.as_hashdb_mut());
 					account.commit_code(account_db.as_hashdb_mut());
+
+					if let Some(ref mut meta) = meta_db {
+						account.commit_meta(address.clone(), &mut *meta);
+					}
 				}
 				_ => {}
 			}
@@ -425,6 +430,10 @@ impl State {
 					AccountEntry::Killed => {
 						try!(trie.remove(address));
 						**a = AccountEntry::Missing;
+
+						if let Some(ref mut meta) = meta_db {
+							meta.remove(address.clone());
+						}
 					},
 					_ => {},
 				}
@@ -454,7 +463,7 @@ impl State {
 	/// Commits our cached account changes into the trie.
 	pub fn commit(&mut self) -> Result<(), Error> {
 		assert!(self.snapshots.borrow().is_empty());
-		Self::commit_into(&self.factories, &mut self.db, &mut self.root, &mut *self.cache.borrow_mut())
+		Self::commit_into(&self.factories, &mut self.db, &mut self.root, &mut *self.cache.borrow_mut(), self.meta_db.as_mut())
 	}
 
 	/// Clear state cache
@@ -518,6 +527,22 @@ impl State {
 		}
 	}
 
+	// attempt to load details from the backing database, first the meta
+	// and then the journal.
+	fn load_details(&self, a: &Address) -> Option<Account> {
+		if let Some(meta) = self.meta_db.as_ref() {
+			// the meta db can definitively tell if an account exists
+			// or not.
+			return meta.get(a).map(Account::from_meta);
+		}
+
+		let db = self.factories.trie.readonly(self.db.as_hashdb(), &self.root).expect(SEC_TRIE_DB_UNWRAP_STR);
+		match db.get(a) {
+			Ok(acc) => acc.map(Account::from_rlp),
+			Err(e) => panic!("Potential DB corruption encountered: {}", e),
+		}
+	}
+
 	/// Check caches for required data
 	/// First searches for account in the local, then the shared cache.
 	/// Populates local cache if nothing found.
@@ -544,11 +569,7 @@ impl State {
 			Some(r) => r,
 			None => {
 				// not found in the global cache, get from the DB and insert into local
-				let db = self.factories.trie.readonly(self.db.as_hashdb(), &self.root).expect(SEC_TRIE_DB_UNWRAP_STR);
-				let mut maybe_acc = match db.get(a) {
-					Ok(acc) => acc.map(Account::from_rlp),
-					Err(e) => panic!("Potential DB corruption encountered: {}", e),
-				};
+				let mut maybe_acc = self.load_details(a);
 				if let Some(ref mut account) = maybe_acc.as_mut() {
 					let accountdb = self.factories.accountdb.readonly(self.db.as_hashdb(), account.address_hash(a));
 					Self::update_account_cache(require, account, accountdb.as_hashdb());
