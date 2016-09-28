@@ -63,7 +63,7 @@ impl PodAccount {
 		stream.out()
 	}
 
-	/// Place additional data into given hash DB.
+	/// Place additional data into given hash DB, returning the storage root.
 	pub fn insert_additional(&self, db: &mut AccountDBMut) {
 		match self.code {
 			Some(ref c) if !c.is_empty() => { db.insert(c); }

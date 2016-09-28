@@ -440,6 +440,11 @@ impl MetaDB {
 		Ok(())
 	}
 
+	/// Whether the meta database is empty.
+	pub fn is_empty(&self) -> bool {
+		self.last_committed.1 > 0 || self.journal.entries.is_empty()
+	}
+
 	// set the branch to completely empty.
 	fn clear_branch(&mut self) {
 		self.branch = MetaBranch {

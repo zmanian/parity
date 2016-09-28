@@ -27,7 +27,8 @@ use state_db::StateDB;
 
 mod account;
 mod substate;
-mod meta_db;
+
+pub mod meta_db;
 
 pub use self::account::Account;
 pub use self::substate::Substate;

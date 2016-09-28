@@ -178,9 +178,14 @@ impl Client {
 
 		let journal_db = journaldb::new(db.clone(), config.pruning, ::db::COL_STATE);
 		let mut state_db = StateDB::new(journal_db);
+		let mut meta_db = try!(MetaDB::new(db.clone(), ::db::COL_META).map_err(ClientError::Database));
+
 		if state_db.journal_db().is_empty() && try!(spec.ensure_db_good(&mut state_db)) {
 			let mut batch = DBTransaction::new(&db);
 			try!(state_db.commit(&mut batch, 0, &spec.genesis_header().hash(), None));
+			if spec.ensure_meta_good(&mut meta_db) {
+				meta_db.journal_under(&mut batch, 0, spec.genesis_header().hash(), Default::default());
+			}
 			try!(db.write(batch).map_err(ClientError::Database));
 		}
 

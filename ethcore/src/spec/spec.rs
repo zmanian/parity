@@ -254,6 +254,28 @@ impl Spec {
 		} else { Ok(false) }
 	}
 
+	/// Ensure that the given meta DB has the genesis state in it.
+	/// `true` means that the data in the meta DB has been changed.
+	pub fn ensure_meta_good(&self, db: &mut ::state::MetaDB) -> bool {
+		if !db.is_empty() { return false }
+
+		for (address, account) in self.genesis_state.get().iter() {
+			let meta = ::state::meta_db::AccountMeta {
+				code_size: account.code.as_ref().map_or(0, |c| c.len()),
+				code_hash: account.code.as_ref().map_or(SHA3_EMPTY, |c| c.sha3()),
+				nonce: account.nonce.clone(),
+				balance: account.balance.clone(),
+				storage_root: sec_trie_root(account.storage.iter()
+					.map(|(k, v)| (k.to_vec(), ::rlp::encode(&U256::from(&**v)).to_vec()))
+					.collect()),
+			};
+
+			db.set(address.clone(), meta);
+		}
+
+		true
+	}
+
 	/// Loads spec from json file.
 	pub fn load<R>(reader: R) -> Result<Self, String> where R: Read {
 		match ethjson::spec::Spec::load(reader) {
