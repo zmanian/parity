@@ -34,7 +34,7 @@ use io::*;
 use views::{BlockView, HeaderView, BodyView};
 use error::{ImportError, ExecutionError, CallError, BlockError, ImportResult, Error as EthcoreError};
 use header::BlockNumber;
-use state::State;
+use state::{State, MetaDB};
 use spec::Spec;
 use basic_types::Seal;
 use engines::Engine;
@@ -142,11 +142,16 @@ pub struct Client {
 	queue_transactions: AtomicUsize,
 	last_hashes: RwLock<VecDeque<H256>>,
 	factories: Factories,
+	meta_db: Mutex<Option<MetaDB>>,
 }
 
 /// The pruning constant -- how old blocks must be before we
 /// assume finality of a given candidate.
 pub const HISTORY: u64 = 1200;
+
+/// The meta-db pruning constant -- how old blocks must be before we
+/// assume finality of a given candidate.
+pub const META_HISTORY: u64 = 64;
 
 /// Append a path element to the given path and return the string.
 pub fn append_path<P>(path: P, item: &str) -> String where P: AsRef<Path> {
@@ -219,6 +224,7 @@ impl Client {
 			queue_transactions: AtomicUsize::new(0),
 			last_hashes: RwLock::new(VecDeque::new()),
 			factories: factories,
+			meta_db: Mutex::new(None), // todo: load the meta db.
 		};
 		Ok(Arc::new(client))
 	}
@@ -270,7 +276,7 @@ impl Client {
 		Arc::new(last_hashes)
 	}
 
-	fn check_and_close_block(&self, block: &PreverifiedBlock) -> Result<LockedBlock, ()> {
+	fn check_and_close_block(&self, block: &PreverifiedBlock, mut meta_db: Option<MetaDB>) -> Result<LockedBlock, ()> {
 		let engine = &*self.engine;
 		let header = &block.header;
 
@@ -301,7 +307,14 @@ impl Client {
 		let last_hashes = self.build_last_hashes(header.parent_hash().clone());
 		let db = self.state_db.read().boxed_clone();
 
-		let enact_result = enact_verified(block, engine, self.tracedb.read().tracing_enabled(), db, &parent, last_hashes, self.factories.clone());
+		// set the tip of the meta view to where it was after this block's
+		// parent was journalled.
+		if let Some(meta) = meta_db.as_mut() {
+			// TODO: instead of panic, rebuild whole meta db from ancient block.
+			meta.branch_to(header.parent_hash().clone(), header.number() - 1)
+				.expect(&format!("Reorg greater than {} blocks. Maybe a 51% attack?", META_HISTORY));
+		}
+		let enact_result = enact_verified(block, engine, self.tracedb.read().tracing_enabled(), db, &parent, last_hashes, self.factories.clone(), meta_db);
 		if let Err(e) = enact_result {
 			warn!(target: "client", "Block import failed for #{} ({})\nError: {:?}", header.number(), header.hash(), e);
 			return Err(());
@@ -353,6 +366,7 @@ impl Client {
 
 			let _import_lock = self.import_lock.lock();
 			let _timer = PerfTimer::new("import_verified_blocks");
+			let mut meta_db = self.meta_db.lock();
 			let start = precise_time_ns();
 			let blocks = self.block_queue.drain(max_blocks_to_import);
 
@@ -362,7 +376,7 @@ impl Client {
 					invalid_blocks.insert(header.hash());
 					continue;
 				}
-				let closed_block = self.check_and_close_block(&block);
+				let closed_block = self.check_and_close_block(&block, meta_db.take());
 				if let Err(_) = closed_block {
 					invalid_blocks.insert(header.hash());
 					continue;
@@ -371,8 +385,9 @@ impl Client {
 				let closed_block = closed_block.unwrap();
 				imported_blocks.push(header.hash());
 
-				let route = self.commit_block(closed_block, &header.hash(), &block.bytes);
+				let (route, updated_meta) = self.commit_block(closed_block, &header.hash(), &block.bytes);
 				import_results.push(route);
+				*meta_db = updated_meta;
 
 				self.report.write().accrue_block(&block);
 			}
@@ -417,7 +432,9 @@ impl Client {
 		imported
 	}
 
-	fn commit_block<B>(&self, block: B, hash: &H256, block_data: &[u8]) -> ImportRoute where B: IsBlock + Drain {
+	fn commit_block<B>(&self, block: B, hash: &H256, block_data: &[u8]) -> (ImportRoute, Option<MetaDB>)
+		where B: IsBlock + Drain
+	{
 		let number = block.header().number();
 		let parent = block.header().parent_hash().clone();
 		let chain = self.chain.read();
@@ -442,7 +459,8 @@ impl Client {
 		// CHECK! I *think* this is fine, even if the state_root is equal to another
 		// already-imported block of the same number.
 		// TODO: Prove it with a test.
-		block.drain().commit(&mut batch, number, hash, ancient).expect("DB commit failed.");
+		let (mut journal_db, mut meta) = block.drain();
+		journal_db.commit(&mut batch, number, hash, ancient).expect("DB commit failed.");
 
 		let route = chain.insert_block(&mut batch, block_data, receipts);
 		self.tracedb.read().import(&mut batch, TraceImportRequest {
@@ -452,12 +470,22 @@ impl Client {
 			enacted: route.enacted.clone(),
 			retracted: route.retracted.len()
 		});
+
+		// apply the meta journal.
+		if let Some(meta) = meta.as_mut() {
+			meta.journal_under(&mut batch, number, hash.clone(), parent.clone());
+			if number >= META_HISTORY {
+				let n = number - META_HISTORY;
+				meta.mark_canonical(&mut batch, n, chain.block_hash(n).unwrap())
+			}
+		}
 		// Final commit to the DB
 		self.db.read().write_buffered(batch);
 		chain.commit();
 
 		self.update_last_hashes(&parent, hash);
-		route
+
+		(route, meta)
 	}
 
 	fn update_last_hashes(&self, parent: &H256, hash: &H256) {
@@ -506,7 +534,7 @@ impl Client {
 
 			let root = HeaderView::new(&header).state_root();
 
-			State::from_existing(db, root, self.engine.account_start_nonce(), self.factories.clone()).ok()
+			State::from_existing(db, root, self.engine.account_start_nonce(), self.factories.clone(), None).ok()
 		})
 	}
 
@@ -531,7 +559,8 @@ impl Client {
 			self.state_db.read().boxed_clone(),
 			HeaderView::new(&self.best_block_header()).state_root(),
 			self.engine.account_start_nonce(),
-			self.factories.clone())
+			self.factories.clone(),
+			None) // todo: reuse meta db here
 		.expect("State root of best block header always valid.")
 	}
 
@@ -1052,6 +1081,7 @@ impl MiningBlockChainClient for Client {
 			author,
 			gas_range_target,
 			extra_data,
+			None,
 		).expect("OpenBlock::new only fails if parent state root invalid; state root of best block's header is never invalid; qed");
 
 		// Add uncles
@@ -1080,7 +1110,7 @@ impl MiningBlockChainClient for Client {
 		let number = block.header().number();
 
 		let block_data = block.rlp_bytes();
-		let route = self.commit_block(block, &h, &block_data);
+		let (route, _) = self.commit_block(block, &h, &block_data);
 		trace!(target: "client", "Imported sealed block #{} ({})", number, h);
 
 		let (enacted, retracted) = self.calculate_enacted_retracted(&[route]);

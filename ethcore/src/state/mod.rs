@@ -51,6 +51,7 @@ pub struct State {
 	snapshots: RefCell<Vec<HashMap<Address, Option<Option<Account>>>>>,
 	account_start_nonce: U256,
 	factories: Factories,
+	meta_db: Option<MetaDB>,
 }
 
 const SEC_TRIE_DB_UNWRAP_STR: &'static str = "A state can only be created with valid root. Creating a SecTrieDB with a valid root will not fail. \
@@ -73,11 +74,12 @@ impl State {
 			snapshots: RefCell::new(Vec::new()),
 			account_start_nonce: account_start_nonce,
 			factories: factories,
+			meta_db: None
 		}
 	}
 
 	/// Creates new state with existing state root
-	pub fn from_existing(db: Box<JournalDB>, root: H256, account_start_nonce: U256, factories: Factories) -> Result<State, TrieError> {
+	pub fn from_existing(db: Box<JournalDB>, root: H256, account_start_nonce: U256, factories: Factories, meta_db: Option<MetaDB>) -> Result<State, TrieError> {
 		if !db.as_hashdb().contains(&root) {
 			return Err(TrieError::InvalidStateRoot(root));
 		}
@@ -88,7 +90,8 @@ impl State {
 			cache: RefCell::new(HashMap::new()),
 			snapshots: RefCell::new(Vec::new()),
 			account_start_nonce: account_start_nonce,
-			factories: factories
+			factories: factories,
+			meta_db: meta_db,
 		};
 
 		Ok(state)
@@ -147,8 +150,8 @@ impl State {
 	}
 
 	/// Destroy the current object and return root and database.
-	pub fn drop(self) -> (H256, Box<JournalDB>) {
-		(self.root, self.db)
+	pub fn drop(self) -> (H256, Box<JournalDB>, Option<MetaDB>) {
+		(self.root, self.db, self.meta_db)
 	}
 
 	/// Return reference to root
@@ -452,6 +455,7 @@ impl Clone for State {
 			snapshots: RefCell::new(self.snapshots.borrow().clone()),
 			account_start_nonce: self.account_start_nonce.clone(),
 			factories: self.factories.clone(),
+			meta_db: None,
 		}
 	}
 }
@@ -1319,7 +1323,7 @@ fn should_trace_suicide() {
 fn code_from_database() {
 	let a = Address::zero();
 	let temp = RandomTempPath::new();
-	let (root, db) = {
+	let (root, db, _) = {
 		let mut state = get_temp_state_in(temp.as_path());
 		state.require_or_from(&a, false, ||Account::new_contract(42.into(), 0.into()), |_|{});
 		state.init_code(&a, vec![1, 2, 3]);
@@ -1329,7 +1333,7 @@ fn code_from_database() {
 		state.drop()
 	};
 
-	let state = State::from_existing(db, root, U256::from(0u8), Default::default()).unwrap();
+	let state = State::from_existing(db, root, U256::from(0u8), Default::default(), None).unwrap();
 	assert_eq!(state.code(&a), Some([1u8, 2, 3].to_vec()));
 }
 
@@ -1337,14 +1341,14 @@ fn code_from_database() {
 fn storage_at_from_database() {
 	let a = Address::zero();
 	let temp = RandomTempPath::new();
-	let (root, db) = {
+	let (root, db, _) = {
 		let mut state = get_temp_state_in(temp.as_path());
 		state.set_storage(&a, H256::from(&U256::from(1u64)), H256::from(&U256::from(69u64)));
 		state.commit().unwrap();
 		state.drop()
 	};
 
-	let s = State::from_existing(db, root, U256::from(0u8), Default::default()).unwrap();
+	let s = State::from_existing(db, root, U256::from(0u8), Default::default(), None).unwrap();
 	assert_eq!(s.storage_at(&a, &H256::from(&U256::from(1u64))), H256::from(&U256::from(69u64)));
 }
 
@@ -1352,7 +1356,7 @@ fn storage_at_from_database() {
 fn get_from_database() {
 	let a = Address::zero();
 	let temp = RandomTempPath::new();
-	let (root, db) = {
+	let (root, db, _) = {
 		let mut state = get_temp_state_in(temp.as_path());
 		state.inc_nonce(&a);
 		state.add_balance(&a, &U256::from(69u64));
@@ -1361,7 +1365,7 @@ fn get_from_database() {
 		state.drop()
 	};
 
-	let state = State::from_existing(db, root, U256::from(0u8), Default::default()).unwrap();
+	let state = State::from_existing(db, root, U256::from(0u8), Default::default(), None).unwrap();
 	assert_eq!(state.balance(&a), U256::from(69u64));
 	assert_eq!(state.nonce(&a), U256::from(1u64));
 }
@@ -1384,7 +1388,7 @@ fn remove() {
 fn remove_from_database() {
 	let a = Address::zero();
 	let temp = RandomTempPath::new();
-	let (root, db) = {
+	let (root, db, _) = {
 		let mut state = get_temp_state_in(temp.as_path());
 		state.inc_nonce(&a);
 		state.commit().unwrap();
@@ -1393,8 +1397,8 @@ fn remove_from_database() {
 		state.drop()
 	};
 
-	let (root, db) = {
-		let mut state = State::from_existing(db, root, U256::from(0u8), Default::default()).unwrap();
+	let (root, db, _) = {
+		let mut state = State::from_existing(db, root, U256::from(0u8), Default::default(), None).unwrap();
 		assert_eq!(state.exists(&a), true);
 		assert_eq!(state.nonce(&a), U256::from(1u64));
 		state.kill_account(&a);
@@ -1404,7 +1408,7 @@ fn remove_from_database() {
 		state.drop()
 	};
 
-	let state = State::from_existing(db, root, U256::from(0u8), Default::default()).unwrap();
+	let state = State::from_existing(db, root, U256::from(0u8), Default::default(), None).unwrap();
 	assert_eq!(state.exists(&a), false);
 	assert_eq!(state.nonce(&a), U256::from(0u64));
 }

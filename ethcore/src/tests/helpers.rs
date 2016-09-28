@@ -172,7 +172,8 @@ pub fn generate_dummy_client_with_spec_and_data<F>(get_test_spec: F, block_numbe
 			Arc::new(last_hashes.clone()),
 			author.clone(),
 			(3141562.into(), 31415620.into()),
-			vec![]
+			vec![],
+			None,
 		).unwrap();
 		b.set_difficulty(U256::from(0x20000));
 		rolling_timestamp += 10;
@@ -198,7 +199,7 @@ pub fn generate_dummy_client_with_spec_and_data<F>(get_test_spec: F, block_numbe
 		}
 
 		last_header = BlockView::new(&b.rlp_bytes()).header();
-		db = b.drain();
+		db = b.drain().0;
 	}
 	client.flush_queue();
 	client.import_verified_blocks();

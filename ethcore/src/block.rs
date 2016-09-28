@@ -178,8 +178,8 @@ pub trait IsBlock {
 
 /// Trait for a object that has a state database.
 pub trait Drain {
-	/// Drop this object and return the underlieing database.
-	fn drain(self) -> Box<JournalDB>;
+	/// Drop this object and return the underlieing databases.
+	fn drain(self) -> (Box<JournalDB>, Option<MetaDB>);
 }
 
 impl IsBlock for ExecutedBlock {
@@ -237,8 +237,9 @@ impl<'x> OpenBlock<'x> {
 		author: Address,
 		gas_range_target: (U256, U256),
 		extra_data: Bytes,
+		meta_db: Option<MetaDB>,
 	) -> Result<Self, Error> {
-		let state = try!(State::from_existing(db, parent.state_root().clone(), engine.account_start_nonce(), factories));
+		let state = try!(State::from_existing(db, parent.state_root().clone(), engine.account_start_nonce(), factories, meta_db));
 		let mut r = OpenBlock {
 			block: ExecutedBlock::new(state, tracing),
 			engine: engine,
@@ -474,7 +475,10 @@ impl LockedBlock {
 
 impl Drain for LockedBlock {
 	/// Drop this object and return the underlieing database.
-	fn drain(self) -> Box<JournalDB> { self.block.state.drop().1 }
+	fn drain(self) -> (Box<JournalDB>, Option<MetaDB>) {
+		 let (_, jdb, mdb) = self.block.state.drop();
+		 (jdb, mdb)
+	}
 }
 
 impl SealedBlock {
@@ -490,7 +494,10 @@ impl SealedBlock {
 
 impl Drain for SealedBlock {
 	/// Drop this object and return the underlieing database.
-	fn drain(self) -> Box<JournalDB> { self.block.state.drop().1 }
+	fn drain(self) -> (Box<JournalDB>, Option<MetaDB>) {
+		let (_, jdb, mdb) = self.block.state.drop();
+		(jdb, mdb)
+	}
 }
 
 impl IsBlock for SealedBlock {
@@ -509,15 +516,28 @@ pub fn enact(
 	parent: &Header,
 	last_hashes: Arc<LastHashes>,
 	factories: Factories,
+	meta_db: Option<MetaDB>,
 ) -> Result<LockedBlock, Error> {
 	{
 		if ::log::max_log_level() >= ::log::LogLevel::Trace {
-			let s = try!(State::from_existing(db.boxed_clone(), parent.state_root().clone(), engine.account_start_nonce(), factories.clone()));
+			let s = try!(State::from_existing(db.boxed_clone(), parent.state_root().clone(), engine.account_start_nonce(), factories.clone(), None));
 			trace!(target: "enact", "num={}, root={}, author={}, author_balance={}\n", header.number(), s.root(), header.author(), s.balance(&header.author()));
 		}
 	}
 
-	let mut b = try!(OpenBlock::new(engine, factories, tracing, db, parent, last_hashes, Address::new(), (3141562.into(), 31415620.into()), vec![]));
+	let mut b = try!(OpenBlock::new(
+		engine,
+		factories,
+		tracing,
+		db,
+		parent,
+		last_hashes,
+		Address::new(),
+		(3141562.into(), 31415620.into()),
+		vec![],
+		meta_db,
+	));
+
 	b.set_difficulty(*header.difficulty());
 	b.set_gas_limit(*header.gas_limit());
 	b.set_timestamp(header.timestamp());
@@ -544,7 +564,7 @@ pub fn enact_bytes(
 ) -> Result<LockedBlock, Error> {
 	let block = BlockView::new(block_bytes);
 	let header = block.header();
-	enact(&header, &block.transactions(), &block.uncles(), engine, tracing, db, parent, last_hashes, factories)
+	enact(&header, &block.transactions(), &block.uncles(), engine, tracing, db, parent, last_hashes, factories, None)
 }
 
 /// Enact the block given by `block_bytes` using `engine` on the database `db` with given `parent` block header
@@ -557,9 +577,10 @@ pub fn enact_verified(
 	parent: &Header,
 	last_hashes: Arc<LastHashes>,
 	factories: Factories,
+	meta_db: Option<MetaDB>,
 ) -> Result<LockedBlock, Error> {
 	let view = BlockView::new(&block.bytes);
-	enact(&block.header, &block.transactions, &view.uncles(), engine, tracing, db, parent, last_hashes, factories)
+	enact(&block.header, &block.transactions, &view.uncles(), engine, tracing, db, parent, last_hashes, factories, meta_db)
 }
 
 /// Enact the block given by `block_bytes` using `engine` on the database `db` with given `parent` block header. Seal the block aferwards
@@ -592,7 +613,7 @@ mod tests {
 		let mut db = db_result.take();
 		spec.ensure_db_good(db.as_hashdb_mut()).unwrap();
 		let last_hashes = Arc::new(vec![genesis_header.hash()]);
-		let b = OpenBlock::new(&*spec.engine, Default::default(), false, db, &genesis_header, last_hashes, Address::zero(), (3141562.into(), 31415620.into()), vec![]).unwrap();
+		let b = OpenBlock::new(&*spec.engine, Default::default(), false, db, &genesis_header, last_hashes, Address::zero(), (3141562.into(), 31415620.into()), vec![], None).unwrap();
 		let b = b.close_and_lock();
 		let _ = b.seal(&*spec.engine, vec![]);
 	}
@@ -608,10 +629,10 @@ mod tests {
 		let mut db = db_result.take();
 		spec.ensure_db_good(db.as_hashdb_mut()).unwrap();
 		let last_hashes = Arc::new(vec![genesis_header.hash()]);
-		let b = OpenBlock::new(engine, Default::default(), false, db, &genesis_header, last_hashes.clone(), Address::zero(), (3141562.into(), 31415620.into()), vec![]).unwrap()
+		let b = OpenBlock::new(engine, Default::default(), false, db, &genesis_header, last_hashes.clone(), Address::zero(), (3141562.into(), 31415620.into()), vec![], None).unwrap()
 			.close_and_lock().seal(engine, vec![]).unwrap();
 		let orig_bytes = b.rlp_bytes();
-		let orig_db = b.drain();
+		let orig_db = b.drain().0;
 
 		let mut db_result = get_temp_journal_db();
 		let mut db = db_result.take();
@@ -620,7 +641,7 @@ mod tests {
 
 		assert_eq!(e.rlp_bytes(), orig_bytes);
 
-		let db = e.drain();
+		let db = e.drain().0;
 		assert_eq!(orig_db.keys(), db.keys());
 		assert!(orig_db.keys().iter().filter(|k| orig_db.get(k.0) != db.get(k.0)).next() == None);
 	}
@@ -636,7 +657,7 @@ mod tests {
 		let mut db = db_result.take();
 		spec.ensure_db_good(db.as_hashdb_mut()).unwrap();
 		let last_hashes = Arc::new(vec![genesis_header.hash()]);
-		let mut open_block = OpenBlock::new(engine, Default::default(), false, db, &genesis_header, last_hashes.clone(), Address::zero(), (3141562.into(), 31415620.into()), vec![]).unwrap();
+		let mut open_block = OpenBlock::new(engine, Default::default(), false, db, &genesis_header, last_hashes.clone(), Address::zero(), (3141562.into(), 31415620.into()), vec![], None).unwrap();
 		let mut uncle1_header = Header::new();
 		uncle1_header.set_extra_data(b"uncle1".to_vec());
 		let mut uncle2_header = Header::new();
@@ -646,7 +667,7 @@ mod tests {
 		let b = open_block.close_and_lock().seal(engine, vec![]).unwrap();
 
 		let orig_bytes = b.rlp_bytes();
-		let orig_db = b.drain();
+		let orig_db = b.drain().0;
 
 		let mut db_result = get_temp_journal_db();
 		let mut db = db_result.take();
@@ -658,7 +679,7 @@ mod tests {
 		let uncles = BlockView::new(&bytes).uncles();
 		assert_eq!(uncles[1].extra_data(), b"uncle2");
 
-		let db = e.drain();
+		let db = e.drain().0;
 		assert_eq!(orig_db.keys(), db.keys());
 		assert!(orig_db.keys().iter().filter(|k| orig_db.get(k.0) != db.get(k.0)).next() == None);
 	}

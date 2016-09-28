@@ -26,7 +26,7 @@
 //!
 //! For each hash, we store a list of changes in that candidate.
 
-use util::{Address, H160, H256, U256};
+use util::{Address, H256, U256};
 use util::kvdb::{Database, DBTransaction};
 use rlp::{Decoder, DecoderError, RlpDecodable, RlpEncodable, RlpStream, Stream, Rlp, View};
 
@@ -600,9 +600,9 @@ impl MetaBranch {
 	// if the ancient ancestor isn't equal to the canon id, returns false, true otherwise.
 	// this signals that the branch needs to be wiped.
 	fn remove_ancient(&mut self, canon_id: &H256) -> bool {
-		let (hash, delta) = match self.ancestors.pop_front() {
+		let delta = match self.ancestors.pop_front() {
 			Some((hash, delta)) => if &hash == canon_id {
-				(hash, delta)
+				delta
 			} else {
 				return false
 			},
