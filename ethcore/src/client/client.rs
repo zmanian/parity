@@ -186,6 +186,7 @@ impl Client {
 			try!(state_db.commit(&mut batch, 0, &genesis_hash, None));
 			if spec.ensure_meta_good(&mut meta_db) {
 				meta_db.journal_under(&mut batch, 0, genesis_hash, Default::default());
+				meta_db.mark_canonical(&mut batch, 0, genesis_hash);
 			}
 			try!(db.write(batch).map_err(ClientError::Database));
 		}

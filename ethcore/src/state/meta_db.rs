@@ -96,7 +96,7 @@ impl<'a> From<&'a BranchDelta> for JournalDelta {
 }
 
 /// Account meta-information.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct AccountMeta {
 	/// The size of this account's code.
 	pub code_size: usize,
@@ -220,7 +220,6 @@ impl MetaDB {
 			branch: MetaBranch {
 				ancestors: VecDeque::new(),
 				current_changes: Vec::new(),
-				era: last_committed.1,
 				overlay: HashMap::new(),
 				recent: HashMap::new(),
 			}
@@ -405,7 +404,7 @@ impl MetaDB {
 			let branch_head = self.branch.latest_id()
 				.unwrap_or(&self.last_committed.0);
 
-			if new_era == self.branch.era && branch_head == &hash { return Ok(()) }
+			if new_era == self.branch_era() && branch_head == &hash { return Ok(()) }
 		}
 
 		let mut to_era = new_era;
@@ -467,7 +466,6 @@ impl MetaDB {
 		self.branch = MetaBranch {
 			ancestors: VecDeque::new(),
 			current_changes: Vec::new(),
-			era: self.last_committed.1,
 			overlay: HashMap::new(),
 			recent: HashMap::new(),
 		};
@@ -484,7 +482,6 @@ impl MetaDB {
 struct MetaBranch {
 	ancestors: VecDeque<(H256, Vec<(Address, BranchDelta)>)>,
 	current_changes: Vec<(Address, BranchDelta)>,
-	era: u64, // era of the best block in the ancestors.
 
 	// current state of account meta, accruing from the database's last
 	// to the current changes. `None` means killed, missing means no change from db,
@@ -630,4 +627,56 @@ impl MetaBranch {
 #[cfg(test)]
 mod tests {
 	use super::{AccountMeta, MetaDB};
+	use devtools::RandomTempPath;
+
+	use util::{U256, H256};
+	use util::kvdb::Database;
+
+	use std::sync::Arc;
+
+	#[test]
+	fn loads_journal() {
+		let path = RandomTempPath::create_dir();
+		let db = Arc::new(Database::open_default(&*path.as_path().to_string_lossy()).unwrap());
+		let mut meta_db = MetaDB::new(db.clone(), None, &Default::default()).unwrap();
+
+		for i in 0..10 {
+			let this = U256::from(i + 1);
+			let parent = U256::from(i);
+
+			let mut batch = db.transaction();
+			meta_db.journal_under(&mut batch, i + 1, this.into(), parent.into());
+			db.write(batch).unwrap();
+		}
+
+		let journal = meta_db.journal;
+
+		let meta_db = MetaDB::new(db.clone(), None, &Default::default()).unwrap();
+
+		assert_eq!(journal, meta_db.journal);
+	}
+
+	#[test]
+	fn mark_canonical_keeps_branch() {
+		let path = RandomTempPath::create_dir();
+		let db = Arc::new(Database::open_default(&*path.as_path().to_string_lossy()).unwrap());
+		let mut meta_db = MetaDB::new(db.clone(), None, &Default::default()).unwrap();
+
+		for i in 0..10 {
+			let this = U256::from(i + 1);
+			let parent = U256::from(i);
+
+			let mut batch = db.transaction();
+			meta_db.journal_under(&mut batch, i + 1, this.into(), parent.into());
+			db.write(batch).unwrap();
+		}
+
+		assert_eq!(meta_db.branch_era(), 10);
+
+		let mut batch = db.transaction();
+		meta_db.mark_canonical(&mut batch, 1, U256::from(1).into());
+		db.write(batch).unwrap();
+
+		assert_eq!(meta_db.branch_era(), 10);
+	}
 }
