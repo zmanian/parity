@@ -171,6 +171,7 @@ impl Client {
 	) -> Result<Arc<Client>, ClientError> {
 		let path = path.to_path_buf();
 		let gb = spec.genesis_block();
+		let genesis_hash = spec.genesis_header().hash();
 
 		let db = Arc::new(try!(Database::open(&db_config, &path.to_str().unwrap()).map_err(ClientError::Database)));
 		let chain = Arc::new(BlockChain::new(config.blockchain.clone(), &gb, db.clone()));
@@ -178,13 +179,13 @@ impl Client {
 
 		let journal_db = journaldb::new(db.clone(), config.pruning, ::db::COL_STATE);
 		let mut state_db = StateDB::new(journal_db);
-		let mut meta_db = try!(MetaDB::new(db.clone(), ::db::COL_META).map_err(ClientError::Database));
+		let mut meta_db = try!(MetaDB::new(db.clone(), ::db::COL_META, &genesis_hash).map_err(ClientError::Database));
 
 		if state_db.journal_db().is_empty() && try!(spec.ensure_db_good(&mut state_db)) {
 			let mut batch = DBTransaction::new(&db);
-			try!(state_db.commit(&mut batch, 0, &spec.genesis_header().hash(), None));
+			try!(state_db.commit(&mut batch, 0, &genesis_hash, None));
 			if spec.ensure_meta_good(&mut meta_db) {
-				meta_db.journal_under(&mut batch, 0, spec.genesis_header().hash(), Default::default());
+				meta_db.journal_under(&mut batch, 0, genesis_hash, Default::default());
 			}
 			try!(db.write(batch).map_err(ClientError::Database));
 		}
@@ -229,7 +230,7 @@ impl Client {
 			queue_transactions: AtomicUsize::new(0),
 			last_hashes: RwLock::new(VecDeque::new()),
 			factories: factories,
-			meta_db: Mutex::new(None), // todo: load the meta db.
+			meta_db: Mutex::new(Some(meta_db)),
 		};
 		Ok(Arc::new(client))
 	}

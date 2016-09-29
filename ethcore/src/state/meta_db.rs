@@ -50,6 +50,7 @@ fn id_key(id: &H256) -> Vec<u8> {
 }
 
 // deltas in the journal -- these don't contain data for simple rollbacks.
+#[derive(Debug, PartialEq)]
 enum JournalDelta {
 	Destroy,
 	Set(AccountMeta),
@@ -78,6 +79,7 @@ impl RlpDecodable for JournalDelta {
 
 // deltas in the branch view -- these contain data making it simple to
 // roll back.
+#[derive(Debug, PartialEq)]
 enum BranchDelta {
 	Destroy(AccountMeta),
 	Init(AccountMeta),
@@ -134,6 +136,7 @@ impl RlpDecodable for AccountMeta {
 }
 
 // The journal used to store meta info.
+#[derive(Debug, PartialEq)]
 struct Journal {
 	// maps block numbers (or more abstractly, eras) to potential canonical meta info.
 	entries: BTreeMap<u64, HashMap<H256, JournalEntry>>,
@@ -171,6 +174,7 @@ impl Journal {
 
 // Each journal entry stores the parent hash of the block it corresponds to
 // and the changes in the meta state it lead to.
+#[derive(Debug, PartialEq)]
 struct JournalEntry {
 	parent: H256,
 	entries: Vec<(Address, JournalDelta)>,
@@ -199,12 +203,12 @@ impl MetaDB {
 	///
 	/// After creation, check the last committed era to see if the genesis state
 	/// is in. If not, it should be inserted, journalled, and marked canonical.
-	pub fn new(db: Arc<Database>, col: Option<u32>) -> Result<Self, String> {
+	pub fn new(db: Arc<Database>, col: Option<u32>, genesis_hash: &H256) -> Result<Self, String> {
 		let last_committed: (H256, u64) = try!(db.get(col, b"latest")).map(|raw| {
 			let rlp = Rlp::new(&raw);
 
 			(rlp.val_at(0), rlp.val_at(1))
-		}).unwrap_or_else(Default::default);
+		}).unwrap_or_else(|| (genesis_hash.clone(), 0));
 
 		let journal = try!(Journal::read_from(&*db, col, last_committed.1));
 
@@ -226,6 +230,8 @@ impl MetaDB {
 	/// Journal all pending changes under the given era and id. Also updates
 	/// the branch view to point at this era.
 	pub fn journal_under(&mut self, batch: &mut DBTransaction, now: u64, id: H256, parent_id: H256) {
+		trace!(target: "meta_db", "journalling ({}, {})", now, id);
+
 		// convert meta branch pending changes to journal entry.
 		let pending: Vec<(Address, JournalDelta)> = self.branch.current_changes
 			.iter()
@@ -272,6 +278,8 @@ impl MetaDB {
 	/// race condition if the meta DB is when .
 	/// As such, it's not suitable to be used outside of the main sync.
 	pub fn mark_canonical(&mut self, batch: &mut DBTransaction, end_era: u64, canon_id: H256) {
+		trace!(target: "meta_db", "mark_canonical: ({}, {})", end_era, canon_id);
+
 		let entries = match self.journal.entries.remove(&end_era) {
 			Some(entries) => entries,
 			None => {
@@ -367,12 +375,16 @@ impl MetaDB {
 	/// On failure, branch state is undefined and must be set to a possible
 	/// branch before continued use.
 	pub fn branch_to(&mut self, hash: H256, new_era: u64) -> Result<(), ReorgImpossible> {
+		trace!(target: "meta_db", "branch to ({}, {})", new_era, hash);
+
 		// as a macro since closures borrow.
 		macro_rules! journal_entry {
-			($era: expr, $id: expr) => {
+			($era: expr, $id: expr) => {{
+				trace!(target: "meta_db", "fetching journal entry: ({}, {})", $era, $id);
+
 				self.journal.entries.get($era)
 					.and_then(|entries| entries.get($id)).ok_or(ReorgImpossible)
-			}
+			}}
 		}
 
 		// first things first, clear any uncommitted changes on the branch.
@@ -390,8 +402,8 @@ impl MetaDB {
 
 		// check for equivalent branch.
 		{
-			let branch_head = self.branch.ancestors.back()
-				.map_or_else(|| &self.last_committed.0, |&(ref h, _)| h);
+			let branch_head = self.branch.latest_id()
+				.unwrap_or(&self.last_committed.0);
 
 			if new_era == self.branch.era && branch_head == &hash { return Ok(()) }
 		}
@@ -400,14 +412,17 @@ impl MetaDB {
 		let mut to_branch = vec![];
 		let mut ancestor_hash = hash.clone();
 
+		trace!(target: "meta_db", "reorg necessary: branch_era={}, new_era={}", self.branch_era(), new_era);
 
 		// reset to same level by rolling back the branch
-		while self.branch.latest_era() > to_era {
+		while self.branch_era() > to_era {
+			trace!(target: "meta_db", "rolling back branch once.");
+
 			// protected by check above.
 			self.branch.rollback().expect("branch known to have enough journalled ancestors; qed");
 		}
 
-		while to_era > self.branch.latest_era() {
+		while to_era > self.branch_era() {
 			let entry = try!(journal_entry!(&to_era, &ancestor_hash));
 
 			to_branch.push(ancestor_hash);
@@ -417,6 +432,8 @@ impl MetaDB {
 
 		// rewind the branch until we find a common ancestor
 		while try!(self.branch.latest_id().ok_or(ReorgImpossible)) != &ancestor_hash {
+			trace!(target: "meta_db", "rolling back branch");
+
 			try!(self.branch.rollback().ok_or(ReorgImpossible));
 
 			let entry = try!(journal_entry!(&to_era, &ancestor_hash));
@@ -434,7 +451,7 @@ impl MetaDB {
 			self.branch.accrue_journal(id, &entry.entries, &*self.db, self.col);
 		}
 
-		assert_eq!(self.branch.latest_era(), new_era);
+		assert_eq!(self.branch_era(), new_era);
 		assert_eq!(self.branch.latest_id(), Some(&hash));
 
 		Ok(())
@@ -455,9 +472,15 @@ impl MetaDB {
 			recent: HashMap::new(),
 		};
 	}
+
+	// the branch's era.
+	fn branch_era(&self) -> u64 {
+		self.last_committed.1 + self.branch.len()
+	}
 }
 
 // A reorg-friendly view over a branch based on the `MetaDB`.
+#[derive(Debug, PartialEq)]
 struct MetaBranch {
 	ancestors: VecDeque<(H256, Vec<(Address, BranchDelta)>)>,
 	current_changes: Vec<(Address, BranchDelta)>,
@@ -475,10 +498,8 @@ struct MetaBranch {
 }
 
 impl MetaBranch {
-	// latest tracked era.
-	fn latest_era(&self) -> u64 {
-		self.era
-	}
+	// The length of this branch.
+	fn len(&self) -> u64 { self.ancestors.len() as u64 }
 
 	// latest tracked id.
 	fn latest_id(&self) -> Option<&H256> {
@@ -495,8 +516,6 @@ impl MetaBranch {
 	fn rollback(&mut self) -> Option<H256> {
 		match self.ancestors.pop_back() {
 			Some((hash, delta)) => {
-				self.era -= 1;
-
 				// process changes in reverse for proper backtracking.
 				for &(ref address, ref delta) in delta.iter().rev() {
 					match *delta {
@@ -525,8 +544,7 @@ impl MetaBranch {
 			*self.recent.entry(addr).or_insert(0) += 1;
 		}
 
-		self.ancestors.push_back((hash, ::std::mem::replace(&mut self.current_changes, Vec::new())));
-		self.era += 1;
+		self.ancestors.push_back((hash, current_changes));
 	}
 
 	// Accrue deltas from the journal.
@@ -569,7 +587,6 @@ impl MetaBranch {
 			deltas.push((addr.clone(), delta));
 		}
 
-		self.era += 1;
 		self.ancestors.push_back((hash, deltas));
 	}
 
@@ -597,16 +614,20 @@ impl MetaBranch {
 	fn remove_ancient(&mut self, canon_id: &H256) -> bool {
 		let delta = match self.ancestors.pop_front() {
 			Some((hash, delta)) => if &hash == canon_id {
+				trace!(target: "meta_db", "removed ancient ancestor {} from branch.", hash);
 				delta
 			} else {
 				return false
 			},
-			_ => return false,
+			_ => { return false },
 		};
-
-		if self.ancestors.is_empty() { self.era -= 1 }
 
 		self.prune_recent(delta.into_iter().map(|(addr, _)| addr));
 		true
 	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{AccountMeta, MetaDB};
 }
