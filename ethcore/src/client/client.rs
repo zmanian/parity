@@ -319,7 +319,7 @@ impl Client {
 		// parent was journalled.
 		if let Some(meta) = meta_db.as_mut() {
 			// TODO: instead of panic, rebuild whole meta db from ancient block.
-			meta.branch_to(header.parent_hash().clone(), header.number() - 1)
+			meta.branch_to(header.number() - 1, header.parent_hash().clone())
 				.expect(&format!("Reorg greater than {} blocks. Maybe a 51% attack?", META_HISTORY));
 		}
 		let enact_result = enact_verified(block, engine, self.tracedb.read().tracing_enabled(), db, &parent, last_hashes, self.factories.clone(), meta_db);

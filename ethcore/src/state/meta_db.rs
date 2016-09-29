@@ -163,8 +163,10 @@ impl Journal {
 					entries: rlp.at(1).iter().map(|e| (e.val_at(0), e.val_at(1))).collect(),
 				}))
 			}).collect();
+			let candidates = try!(candidates);
 
-			journal.entries.insert(era, try!(candidates));
+			trace!(target: "meta_db", "journal: loaded {} candidates for era {}", candidates.len(), era);
+			journal.entries.insert(era, candidates);
 			era += 1;
 		}
 
@@ -373,7 +375,7 @@ impl MetaDB {
 	///
 	/// On failure, branch state is undefined and must be set to a possible
 	/// branch before continued use.
-	pub fn branch_to(&mut self, hash: H256, new_era: u64) -> Result<(), ReorgImpossible> {
+	pub fn branch_to(&mut self, new_era: u64, hash: H256) -> Result<(), ReorgImpossible> {
 		trace!(target: "meta_db", "branch to ({}, {})", new_era, hash);
 
 		// as a macro since closures borrow.
@@ -430,7 +432,7 @@ impl MetaDB {
 		}
 
 		// rewind the branch until we find a common ancestor
-		while try!(self.branch.latest_id().ok_or(ReorgImpossible)) != &ancestor_hash {
+		while self.branch.latest_id().unwrap_or(&self.last_committed.0) != &ancestor_hash {
 			trace!(target: "meta_db", "rolling back branch");
 
 			try!(self.branch.rollback().ok_or(ReorgImpossible));
@@ -444,7 +446,9 @@ impl MetaDB {
 
 		// and then walk forward, accruing all of the fork branch's changes into
 		// the branch.
-		for (era, id) in (to_era..new_era).zip(to_branch.into_iter().rev()) {
+		for (era, id) in (to_era .. new_era).map(|e| e + 1).zip(to_branch.into_iter().rev()) {
+			trace!(target: "meta_db", "accruing changes from ({}, {})", era, id);
+
 			let entry = journal_entry!(&era, &id).expect("this entry fetched previously; qed");
 
 			self.branch.accrue_journal(id, &entry.entries, &*self.db, self.col);
@@ -640,7 +644,7 @@ mod tests {
 		let db = Arc::new(Database::open_default(&*path.as_path().to_string_lossy()).unwrap());
 		let mut meta_db = MetaDB::new(db.clone(), None, &Default::default()).unwrap();
 
-		for i in 0..10 {
+		for i in 0..10u64 {
 			let this = U256::from(i + 1);
 			let parent = U256::from(i);
 
@@ -662,7 +666,7 @@ mod tests {
 		let db = Arc::new(Database::open_default(&*path.as_path().to_string_lossy()).unwrap());
 		let mut meta_db = MetaDB::new(db.clone(), None, &Default::default()).unwrap();
 
-		for i in 0..10 {
+		for i in 0..10u64 {
 			let this = U256::from(i + 1);
 			let parent = U256::from(i);
 
@@ -678,5 +682,27 @@ mod tests {
 		db.write(batch).unwrap();
 
 		assert_eq!(meta_db.branch_era(), 10);
+		assert!(meta_db.journal.entries.get(&2).unwrap().get(&U256::from(2).into()).is_some());
+	}
+
+	#[test]
+	fn reorg_base_to_head() {
+		let path = RandomTempPath::create_dir();
+		let db = Arc::new(Database::open_default(&*path.as_path().to_string_lossy()).unwrap());
+		let mut meta_db = MetaDB::new(db.clone(), None, &Default::default()).unwrap();
+
+		for i in 0..10u64 {
+			let this = U256::from(i + 1);
+			let parent = U256::from(i);
+
+			let mut batch = db.transaction();
+			meta_db.journal_under(&mut batch, i + 1, this.into(), parent.into());
+			db.write(batch).unwrap();
+		}
+
+		meta_db.clear_branch();
+		assert!(meta_db.journal.entries.get(&1).unwrap().get(&U256::from(1).into()).is_some());
+
+		meta_db.branch_to(10, U256::from(10).into()).unwrap();
 	}
 }
