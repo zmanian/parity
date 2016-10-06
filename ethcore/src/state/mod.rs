@@ -542,7 +542,21 @@ impl State {
 		if let Some(meta) = self.meta_db.as_ref() {
 			// the meta db can definitively tell if an account exists
 			// or not.
-			return meta.get(a).map(Account::from_meta);
+			let meta_res = meta.get(a).map(Account::from_meta);
+
+			if ::log::max_log_level() >= ::log::LogLevel::Debug {
+				let db = self.factories.trie.readonly(self.db.as_hashdb(), &self.root).expect(SEC_TRIE_DB_UNWRAP_STR);
+				let acc_rlp = match db.get(a) {
+					Ok(rlp) => rlp.map(|x| x.to_vec()),
+					Err(e) => panic!("Potential DB corruption encountered: {}", e),
+				};
+
+				let meta_wiped = meta_res.as_ref().map(|a| a.rlp());;
+
+				assert_eq!(acc_rlp, meta_wiped, "Meta DB has inconsistent account data for {}", a);
+			}
+
+			return meta_res;
 		}
 
 		let db = self.factories.trie.readonly(self.db.as_hashdb(), &self.root).expect(SEC_TRIE_DB_UNWRAP_STR);
