@@ -553,7 +553,7 @@ impl State {
 
 				let meta_wiped = meta_res.as_ref().map(|a| a.rlp());;
 
-				assert_eq!(acc_rlp, meta_wiped, "Meta DB has inconsistent account data for {}", a);
+				assert_eq!(acc_rlp, meta_wiped, "Meta DB has inconsistent account data for {:?}", a);
 			}
 
 			return meta_res;

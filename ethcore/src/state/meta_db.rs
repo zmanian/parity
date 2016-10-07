@@ -572,8 +572,6 @@ impl MetaBranch {
 				JournalDelta::Destroy => {
 					let prev = prev.expect("cannot destroy without account existing; qed");
 					self.overlay.insert(addr.clone(), None);
-					trace!(target: "meta_db", "destroyed account ")
-
 					BranchDelta::Destroy(prev)
 				}
 				JournalDelta::Set(ref meta) => {
