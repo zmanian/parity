@@ -317,8 +317,7 @@ impl Client {
 		// Enact Verified Block
 		let parent = chain_has_parent.unwrap();
 		let last_hashes = self.build_last_hashes(header.parent_hash().clone());
-		let is_canon = header.parent_hash() == &chain.best_block_hash();
-		let db = if is_canon { self.state_db.lock().boxed_clone_canon() } else { self.state_db.lock().boxed_clone() };
+		let db = self.state_db.lock().boxed_clone_canon(&header.parent_hash());
 
 		// set the tip of the meta view to where it was after this block's
 		// parent was journalled.
@@ -492,6 +491,10 @@ impl Client {
 				meta.mark_canonical(&mut batch, n, chain.block_hash(n).unwrap())
 			}
 		}
+
+		let is_canon = route.enacted.last().map_or(false, |h| h == hash);
+		state.sync_cache(&route.enacted, &route.retracted, is_canon);
+
 		// Final commit to the DB
 		self.db.read().write_buffered(batch);
 		chain.commit();
@@ -567,9 +570,11 @@ impl Client {
 
 	/// Get a copy of the best block's state.
 	pub fn state(&self) -> State {
+		let header = self.best_block_header();
+		let header = HeaderView::new(&header);
 		State::from_existing(
-			self.state_db.lock().boxed_clone(),
-			HeaderView::new(&self.best_block_header()).state_root(),
+			self.state_db.lock().boxed_clone_canon(&header.hash()),
+			header.state_root(),
 			self.engine.account_start_nonce(),
 			self.factories.clone(),
 			None) // todo: reuse meta db here
@@ -1113,7 +1118,7 @@ impl BlockChainClient for Client {
 	}
 
 	fn pending_transactions(&self) -> Vec<SignedTransaction> {
-		self.miner.pending_transactions()
+		self.miner.pending_transactions(self.chain.read().best_block_number())
 	}
 }
 
@@ -1164,6 +1169,7 @@ impl MiningBlockChainClient for Client {
 		let block_data = block.rlp_bytes();
 		let (route, _) = self.commit_block(block, &h, &block_data);
 		trace!(target: "client", "Imported sealed block #{} ({})", number, h);
+		self.state_db.lock().sync_cache(&route.enacted, &route.retracted, false);
 
 		let (enacted, retracted) = self.calculate_enacted_retracted(&[route]);
 		self.miner.chain_new_blocks(self, &[h.clone()], &[], &enacted, &retracted);
