@@ -23,7 +23,7 @@ use std::default::Default;
 use std::path::PathBuf;
 use rlp::{UntrustedRlp, RlpType, View, Compressible};
 use rocksdb::{DB, Writable, WriteBatch, WriteOptions, IteratorMode, DBIterator,
-	Options, DBCompactionStyle, BlockBasedOptions, Direction, Cache, Column};
+	Options, DBCompactionStyle, BlockBasedOptions, Direction, Cache, Column, ReadOptions};
 
 const DB_BACKGROUND_FLUSHES: i32 = 2;
 const DB_BACKGROUND_COMPACTIONS: i32 = 2;
@@ -207,8 +207,14 @@ pub struct Database {
 	db: RwLock<Option<DBAndColumns>>,
 	config: DatabaseConfig,
 	write_opts: WriteOptions,
-	overlay: RwLock<Vec<HashMap<ElasticArray32<u8>, KeyState>>>,
+	read_opts: ReadOptions,
 	path: String,
+	// Dirty values added with `write_buffered`. Cleaned on `flush`.
+	overlay: RwLock<Vec<HashMap<ElasticArray32<u8>, KeyState>>>,
+	// Values currently being flushed. Cleared when `flush` completes.
+	flushing: RwLock<Vec<HashMap<ElasticArray32<u8>, KeyState>>>,
+	// Prevents concurrent flushes.
+	flushing_lock: Mutex<()>,
 }
 
 impl Database {
@@ -227,6 +233,7 @@ impl Database {
 			try!(opts.set_parsed_options(&format!("rate_limiter_bytes_per_sec={}", rate_limit)));
 		}
 		try!(opts.set_parsed_options(&format!("max_total_wal_size={}", 64 * 1024 * 1024)));
+		try!(opts.set_parsed_options("verify_checksums_in_compaction=0"));
 		opts.set_max_open_files(config.max_open_files);
 		opts.create_if_missing(true);
 		opts.set_use_fsync(false);
@@ -264,6 +271,8 @@ impl Database {
 		if !config.wal {
 			write_opts.disable_wal(true);
 		}
+		let mut read_opts = ReadOptions::new();
+		read_opts.set_verify_checksums(false);
 
 		let mut cfs: Vec<Column> = Vec::new();
 		let db = match config.columns {
@@ -306,7 +315,10 @@ impl Database {
 			config: config.clone(),
 			write_opts: write_opts,
 			overlay: RwLock::new((0..(num_cols + 1)).map(|_| HashMap::new()).collect()),
+			flushing: RwLock::new((0..(num_cols + 1)).map(|_| HashMap::new()).collect()),
+			flushing_lock: Mutex::new(()),
 			path: path.to_owned(),
+			read_opts: read_opts,
 		})
 	}
 
@@ -346,39 +358,44 @@ impl Database {
 	pub fn flush(&self) -> Result<(), String> {
 		match *self.db.read() {
 			Some(DBAndColumns { ref db, ref cfs }) => {
+				let _lock = self.flushing_lock.lock();
 				let batch = WriteBatch::new();
-				let mut overlay = self.overlay.write();
-
-				for (c, column) in overlay.iter_mut().enumerate() {
-					let column_data = mem::replace(column, HashMap::new());
-					for (key, state) in column_data.into_iter() {
-						match state {
-							KeyState::Delete => {
-								if c > 0 {
-									try!(batch.delete_cf(cfs[c - 1], &key));
-								} else {
-									try!(batch.delete(&key));
-								}
-							},
-							KeyState::Insert(value) => {
-								if c > 0 {
-									try!(batch.put_cf(cfs[c - 1], &key, &value));
-								} else {
-									try!(batch.put(&key, &value));
-								}
-							},
-							KeyState::InsertCompressed(value) => {
-								let compressed = UntrustedRlp::new(&value).compress(RlpType::Blocks);
-								if c > 0 {
-									try!(batch.put_cf(cfs[c - 1], &key, &compressed));
-								} else {
-									try!(batch.put(&key, &value));
+				mem::swap(&mut *self.overlay.write(), &mut *self.flushing.write());
+				{
+					for (c, column) in self.flushing.read().iter().enumerate() {
+						for (ref key, ref state) in column.iter() {
+							match **state {
+								KeyState::Delete => {
+									if c > 0 {
+										try!(batch.delete_cf(cfs[c - 1], &key));
+									} else {
+										try!(batch.delete(&key));
+									}
+								},
+								KeyState::Insert(ref value) => {
+									if c > 0 {
+										try!(batch.put_cf(cfs[c - 1], &key, value));
+									} else {
+										try!(batch.put(&key, &value));
+									}
+								},
+								KeyState::InsertCompressed(ref value) => {
+									let compressed = UntrustedRlp::new(&value).compress(RlpType::Blocks);
+									if c > 0 {
+										try!(batch.put_cf(cfs[c - 1], &key, &compressed));
+									} else {
+										try!(batch.put(&key, &value));
+									}
 								}
 							}
 						}
 					}
 				}
-				db.write_opt(batch, &self.write_opts)
+				try!(db.write_opt(batch, &self.write_opts));
+				for column in self.flushing.write().iter_mut() {
+					column.clear();
+				}
+				Ok(())
 			},
 			None => Err("Database is closed".to_owned())
 		}
@@ -420,9 +437,16 @@ impl Database {
 					Some(&KeyState::Insert(ref value)) | Some(&KeyState::InsertCompressed(ref value)) => Ok(Some(value.clone())),
 					Some(&KeyState::Delete) => Ok(None),
 					None => {
-						col.map_or_else(
-							|| db.get(key).map(|r| r.map(|v| v.to_vec())),
-							|c| db.get_cf(cfs[c as usize], key).map(|r| r.map(|v| v.to_vec())))
+						let flushing = &self.flushing.read()[Self::to_overlay_column(col)];
+						match flushing.get(key) {
+							Some(&KeyState::Insert(ref value)) | Some(&KeyState::InsertCompressed(ref value)) => Ok(Some(value.clone())),
+							Some(&KeyState::Delete) => Ok(None),
+							None => {
+								col.map_or_else(
+									|| db.get_opt(key, &self.read_opts).map(|r| r.map(|v| v.to_vec())),
+									|c| db.get_cf_opt(cfs[c as usize], key, &self.read_opts).map(|r| r.map(|v| v.to_vec())))
+							},
+						}
 					},
 				}
 			},
@@ -435,8 +459,8 @@ impl Database {
 	pub fn get_by_prefix(&self, col: Option<u32>, prefix: &[u8]) -> Option<Box<[u8]>> {
 		match *self.db.read() {
 			Some(DBAndColumns { ref db, ref cfs }) => {
-				let mut iter = col.map_or_else(|| db.iterator(IteratorMode::From(prefix, Direction::Forward)),
-					|c| db.iterator_cf(cfs[c as usize], IteratorMode::From(prefix, Direction::Forward)).unwrap());
+				let mut iter = col.map_or_else(|| db.iterator_opt(IteratorMode::From(prefix, Direction::Forward), &self.read_opts),
+					|c| db.iterator_cf_opt(cfs[c as usize], IteratorMode::From(prefix, Direction::Forward), &self.read_opts).unwrap());
 				match iter.next() {
 					// TODO: use prefix_same_as_start read option (not availabele in C API currently)
 					Some((k, v)) => if k[0 .. prefix.len()] == prefix[..] { Some(v) } else { None },
@@ -452,8 +476,8 @@ impl Database {
 		//TODO: iterate over overlay
 		match *self.db.read() {
 			Some(DBAndColumns { ref db, ref cfs }) => {
-				col.map_or_else(|| DatabaseIterator { iter: db.iterator(IteratorMode::Start) },
-					|c| DatabaseIterator { iter: db.iterator_cf(cfs[c as usize], IteratorMode::Start).unwrap() })
+				col.map_or_else(|| DatabaseIterator { iter: db.iterator_opt(IteratorMode::Start, &self.read_opts) },
+					|c| DatabaseIterator { iter: db.iterator_cf_opt(cfs[c as usize], IteratorMode::Start, &self.read_opts).unwrap() })
 			},
 			None => panic!("Not supported yet") //TODO: return an empty iterator or change return type
 		}
@@ -463,6 +487,7 @@ impl Database {
 	fn close(&self) {
 		*self.db.write() = None;
 		self.overlay.write().clear();
+		self.flushing.write().clear();
 	}
 
 	/// Restore the database from a copy at given path.
@@ -502,6 +527,7 @@ impl Database {
 		let db = try!(Self::open(&self.config, &self.path));
 		*self.db.write() = mem::replace(&mut *db.db.write(), None);
 		*self.overlay.write() = mem::replace(&mut *db.overlay.write(), Vec::new());
+		*self.flushing.write() = mem::replace(&mut *db.flushing.write(), Vec::new());
 		Ok(())
 	}
 }

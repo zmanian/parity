@@ -351,7 +351,7 @@ impl<'x> OpenBlock<'x> {
 				let t = outcome.trace;
 				self.block.traces.as_mut().map(|traces| traces.push(t));
 				self.block.receipts.push(outcome.receipt);
-				Ok(self.block.receipts.last().unwrap())
+				Ok(self.block.receipts.last().expect("receipt just pushed; qed"))
 			}
 			Err(x) => Err(From::from(x))
 		}
@@ -405,6 +405,10 @@ impl<'x> OpenBlock<'x> {
 			uncle_bytes: uncle_bytes,
 		}
 	}
+
+	#[cfg(test)]
+	/// Return mutable block reference. To be used in tests only.
+	pub fn block_mut (&mut self) -> &mut ExecutedBlock { &mut self.block }
 }
 
 impl<'x> IsBlock for OpenBlock<'x> {
