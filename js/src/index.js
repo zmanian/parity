@@ -17,12 +17,6 @@
 import 'babel-polyfill';
 import 'whatwg-fetch';
 
-// redirect when not on 127.0.0.1:8180
-const host = `${window.location.hostname}:${window.location.port}`;
-if (host === '127.0.0.1:8080' || host === 'localhost:8080') {
-  window.location = 'http://127.0.0.1:8180';
-}
-
 import es6Promise from 'es6-promise';
 es6Promise.polyfill();
 
@@ -38,6 +32,8 @@ import ContractInstances from './contracts';
 import { initStore } from './redux';
 import { ContextProvider, muiTheme } from './ui';
 import { Accounts, Account, Addresses, Address, Application, Contract, Contracts, Dapp, Dapps, Settings, SettingsBackground, SettingsProxy, SettingsViews, Signer, Status } from './views';
+
+import { setApi } from './redux/providers/apiActions';
 
 import './environment';
 
@@ -60,6 +56,7 @@ ContractInstances.create(api);
 
 const store = initStore(api);
 store.dispatch({ type: 'initAll', api });
+store.dispatch(setApi(api));
 
 const routerHistory = useRouterHistory(createHashHistory)({});
 

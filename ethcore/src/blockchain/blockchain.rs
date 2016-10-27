@@ -196,6 +196,7 @@ pub struct BlockChain {
 
 	pending_best_block: RwLock<Option<BestBlock>>,
 	pending_block_hashes: RwLock<HashMap<BlockNumber, H256>>,
+	pending_block_details: RwLock<HashMap<H256, BlockDetails>>,
 	pending_transaction_addresses: RwLock<HashMap<H256, Option<TransactionAddress>>>,
 }
 
@@ -394,6 +395,8 @@ impl BlockProvider for BlockChain {
 	}
 }
 
+/// An iterator which walks the blockchain towards the genesis.
+#[derive(Clone)]
 pub struct AncestryIter<'a> {
 	current: H256,
 	chain: &'a BlockChain,
@@ -403,16 +406,16 @@ impl<'a> Iterator for AncestryIter<'a> {
 	type Item = H256;
 	fn next(&mut self) -> Option<H256> {
 		if self.current.is_zero() {
-			Option::None
+			None
 		} else {
-			let mut n = self.chain.block_details(&self.current).unwrap().parent;
-			mem::swap(&mut self.current, &mut n);
-			Some(n)
+			self.chain.block_details(&self.current)
+				.map(|details| mem::replace(&mut self.current, details.parent))
 		}
 	}
 }
 
 impl BlockChain {
+	#[cfg_attr(feature="dev", allow(useless_let_if_seq))]
 	/// Create new instance of blockchain from given Genesis
 	pub fn new(config: Config, genesis: &[u8], db: Arc<Database>) -> BlockChain {
 		// 400 is the avarage size of the key
@@ -437,6 +440,7 @@ impl BlockChain {
 			cache_man: Mutex::new(cache_man),
 			pending_best_block: RwLock::new(None),
 			pending_block_hashes: RwLock::new(HashMap::new()),
+			pending_block_details: RwLock::new(HashMap::new()),
 			pending_transaction_addresses: RwLock::new(HashMap::new()),
 		};
 
@@ -564,7 +568,7 @@ impl BlockChain {
 				let range = extras.number as bc::Number .. extras.number as bc::Number;
 				let chain = bc::group::BloomGroupChain::new(self.blooms_config, self);
 				let changes = chain.replace(&range, vec![]);
-				for (k, v) in changes.into_iter() {
+				for (k, v) in changes {
 					batch.write(db::COL_EXTRA, &LogGroupPosition::from(k), &BloomGroup::from(v));
 				}
 				batch.put(db::COL_EXTRA, b"best", &hash);
@@ -893,17 +897,6 @@ impl BlockChain {
 
 	/// Prepares extras update.
 	fn prepare_update(&self, batch: &mut DBTransaction, update: ExtrasUpdate, is_best: bool) {
-		{
-			let block_hashes: Vec<_> = update.block_details.keys().cloned().collect();
-
-			let mut write_details = self.block_details.write();
-			batch.extend_with_cache(db::COL_EXTRA, &mut *write_details, update.block_details, CacheUpdatePolicy::Overwrite);
-
-			let mut cache_man = self.cache_man.lock();
-			for hash in block_hashes {
-				cache_man.note_used(CacheID::BlockDetails(hash));
-			}
-		}
 
 		{
 			let mut write_receipts = self.block_receipts.write();
@@ -915,7 +908,7 @@ impl BlockChain {
 			batch.extend_with_cache(db::COL_EXTRA, &mut *write_blocks_blooms, update.blocks_blooms, CacheUpdatePolicy::Remove);
 		}
 
-		// These cached values must be updated last with all three locks taken to avoid
+		// These cached values must be updated last with all four locks taken to avoid
 		// cache decoherence
 		{
 			let mut best_block = self.pending_best_block.write();
@@ -933,8 +926,10 @@ impl BlockChain {
 				},
 			}
 			let mut write_hashes = self.pending_block_hashes.write();
+			let mut write_details = self.pending_block_details.write();
 			let mut write_txs = self.pending_transaction_addresses.write();
 
+			batch.extend_with_cache(db::COL_EXTRA, &mut *write_details, update.block_details, CacheUpdatePolicy::Overwrite);
 			batch.extend_with_cache(db::COL_EXTRA, &mut *write_hashes, update.block_hashes, CacheUpdatePolicy::Overwrite);
 			batch.extend_with_option_cache(db::COL_EXTRA, &mut *write_txs, update.transactions_addresses, CacheUpdatePolicy::Overwrite);
 		}
@@ -944,9 +939,11 @@ impl BlockChain {
 	pub fn commit(&self) {
 		let mut pending_best_block = self.pending_best_block.write();
 		let mut pending_write_hashes = self.pending_block_hashes.write();
+		let mut pending_block_details = self.pending_block_details.write();
 		let mut pending_write_txs = self.pending_transaction_addresses.write();
 
 		let mut best_block = self.best_block.write();
+		let mut write_block_details = self.block_details.write();
 		let mut write_hashes = self.block_hashes.write();
 		let mut write_txs = self.transaction_addresses.write();
 		// update best block
@@ -959,9 +956,11 @@ impl BlockChain {
 
 		let pending_hashes_keys: Vec<_> = pending_write_hashes.keys().cloned().collect();
 		let enacted_txs_keys: Vec<_> = enacted_txs.keys().cloned().collect();
+		let pending_block_hashes: Vec<_> = pending_block_details.keys().cloned().collect();
 
 		write_hashes.extend(mem::replace(&mut *pending_write_hashes, HashMap::new()));
 		write_txs.extend(enacted_txs.into_iter().map(|(k, v)| (k, v.expect("Transactions were partitioned; qed"))));
+		write_block_details.extend(mem::replace(&mut *pending_block_details, HashMap::new()));
 
 		for hash in retracted_txs.keys() {
 			write_txs.remove(hash);
@@ -974,6 +973,10 @@ impl BlockChain {
 
 		for hash in enacted_txs_keys {
 			cache_man.note_used(CacheID::TransactionAddresses(hash));
+		}
+
+		for hash in pending_block_hashes {
+			cache_man.note_used(CacheID::BlockDetails(hash));
 		}
 	}
 
@@ -999,17 +1002,29 @@ impl BlockChain {
 		if !self.is_known(parent) { return None; }
 
 		let mut excluded = HashSet::new();
-		for a in self.ancestry_iter(parent.clone()).unwrap().take(uncle_generations) {
-			excluded.extend(self.uncle_hashes(&a).unwrap().into_iter());
-			excluded.insert(a);
+		let ancestry = match self.ancestry_iter(parent.clone()) {
+			Some(iter) => iter,
+			None => return None,
+		};
+
+		for a in ancestry.clone().take(uncle_generations) {
+			if let Some(uncles) = self.uncle_hashes(&a) {
+				excluded.extend(uncles);
+				excluded.insert(a);
+			} else {
+				break
+			}
 		}
 
 		let mut ret = Vec::new();
-		for a in self.ancestry_iter(parent.clone()).unwrap().skip(1).take(uncle_generations) {
-			ret.extend(self.block_details(&a).unwrap().children.iter()
-				.filter(|h| !excluded.contains(h))
-			);
+		for a in ancestry.skip(1).take(uncle_generations) {
+			if let Some(details) = self.block_details(&a) {
+				ret.extend(details.children.iter().filter(|h| !excluded.contains(h)))
+			} else {
+				break
+			}
 		}
+
 		Some(ret)
 	}
 
@@ -1282,6 +1297,11 @@ impl BlockChain {
 			ancient_block_hash: best_ancient_block.as_ref().map(|b| b.hash.clone()),
 			ancient_block_number: best_ancient_block.as_ref().map(|b| b.number),
 		}
+	}
+
+	#[cfg(test)]
+	pub fn db(&self) -> &Arc<Database> {
+		&self.db
 	}
 }
 

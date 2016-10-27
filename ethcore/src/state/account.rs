@@ -20,8 +20,6 @@ use util::*;
 use pod_account::*;
 use rlp::*;
 use lru_cache::LruCache;
-use super::meta_db::{MetaDB, AccountMeta};
-
 
 use std::cell::{RefCell, Cell};
 
@@ -59,7 +57,6 @@ impl Account {
 	#[cfg(test)]
 	/// General constructor.
 	pub fn new(balance: U256, nonce: U256, storage: HashMap<H256, H256>, code: Bytes) -> Account {
-		let code_size = code.len();
 		Account {
 			balance: balance,
 			nonce: nonce,
@@ -87,9 +84,9 @@ impl Account {
 			storage_cache: Self::empty_storage_cache(),
 			storage_changes: pod.storage.into_iter().collect(),
 			code_hash: pod.code.as_ref().map_or(SHA3_EMPTY, |c| c.sha3()),
+			code_filth: Filth::Dirty,
 			code_size: Some(pod.code.as_ref().map_or(0, |c| c.len())),
 			code_cache: Arc::new(pod.code.map_or_else(|| { warn!("POD account with unknown code is being created! Assuming no code."); vec![] }, |c| c)),
-			code_filth: Filth::Dirty,
 			address_hash: Cell::new(None),
 		}
 	}
@@ -144,22 +141,6 @@ impl Account {
 		}
 	}
 
-	/// Create a new account from meta details.
-	pub fn from_meta(meta: AccountMeta) -> Account {
-		Account {
-			balance: meta.balance,
-			nonce: meta.nonce,
-			storage_root: meta.storage_root,
-			storage_cache: Self::empty_storage_cache(),
-			storage_changes: HashMap::new(),
-			code_hash: meta.code_hash,
-			code_cache: Arc::new(vec![]),
-			code_size: Some(meta.code_size),
-			code_filth: Filth::Clean,
-			address_hash: Cell::new(None),
-		}
-	}
-
 	/// Set this account's code to the given code.
 	/// NOTE: Account should have been created with `new_contract()`
 	pub fn init_code(&mut self, code: Bytes) {
@@ -191,7 +172,7 @@ impl Account {
 			using it will not fail.");
 
 		let item: U256 = match db.get(key){
-			Ok(x) => x.map_or_else(U256::zero, decode),
+			Ok(x) => x.map_or_else(U256::zero, |v| decode(&*v)),
 			Err(e) => panic!("Encountered potential DB corruption: {}", e),
 		};
 		let value: H256 = item.into();
@@ -241,9 +222,10 @@ impl Account {
 		Some(self.code_cache.clone())
 	}
 
-	/// returns the account's code size. If `None` then the code size cache isn't available.
+	/// returns the account's code size. If `None` then the code cache or code size cache isn't available -
+	/// get someone who knows to call `note_code`.
 	pub fn code_size(&self) -> Option<usize> {
-		self.code_size
+		self.code_size.clone()
 	}
 
 	#[cfg(test)]
@@ -271,8 +253,8 @@ impl Account {
 		self.is_cached() ||
 		match db.get(&self.code_hash) {
 			Some(x) => {
-				self.code_cache = Arc::new(x.to_vec());
 				self.code_size = Some(x.len());
+				self.code_cache = Arc::new(x.to_vec());
 				true
 			},
 			_ => {
@@ -369,42 +351,11 @@ impl Account {
 				self.code_filth = Filth::Clean;
 			},
 			(true, false) => {
-				db.emplace(self.code_hash.clone(), (*self.code_cache).clone());
+				db.emplace(self.code_hash.clone(), DBValue::from_slice(&*self.code_cache));
 				self.code_size = Some(self.code_cache.len());
 				self.code_filth = Filth::Clean;
 			},
 			(false, _) => {},
-		}
-	}
-
-	/// Commit the meta information. Assumes that `commit_code` and `commit_storage` have
-	/// already been called for correct behavior.
-	pub fn commit_meta(&self, address: Address, meta_db: &mut MetaDB) {
-		match (self.code_hash == SHA3_EMPTY, self.code_cache.is_empty()) {
-			(true, _) | (false, false) => {
-				// an account with no code or an account with cached code
-				// can both easily set all meta fields.
-				meta_db.set(address, AccountMeta {
-					nonce: self.nonce.clone(),
-					balance: self.balance.clone(),
-					storage_root: self.storage_root.clone(),
-					code_hash: self.code_hash.clone(),
-					code_size: self.code_cache.len(),
-				});
-			}
-			(false, true) => {
-				// account with no cached code should have a previous entry.
-				if let Some(mut prev) = meta_db.get(&address) {
-					// update all non-code entries. These should already be
-					// correct.
-					prev.nonce = self.nonce.clone();
-					prev.balance = self.balance.clone();
-					prev.storage_root = self.storage_root.clone();
-
-					meta_db.set(address, prev);
-				}
-				// if not, there's nothing to do here.
-			}
 		}
 	}
 
@@ -462,7 +413,7 @@ impl Account {
 		self.code_size = other.code_size;
 		self.address_hash = other.address_hash;
 		let mut cache = self.storage_cache.borrow_mut();
-		for (k, v) in other.storage_cache.into_inner().into_iter() {
+		for (k, v) in other.storage_cache.into_inner() {
 			cache.insert(k.clone() , v.clone()); //TODO: cloning should not be required here
 		}
 		self.storage_changes = other.storage_changes;

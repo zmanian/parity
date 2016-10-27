@@ -101,14 +101,14 @@ use super::SyncConfig;
 use block_sync::{BlockDownloader, BlockRequest, BlockDownloaderImportError as DownloaderImportError};
 use snapshot::{Snapshot, ChunkType};
 use rand::{thread_rng, Rng};
-use api::PeerInfo as PeerInfoDigest;
+use api::{PeerInfo as PeerInfoDigest, WARP_SYNC_PROTOCOL_ID};
 
 known_heap_size!(0, PeerInfo);
 
 type PacketDecodeError = DecoderError;
 
 const PROTOCOL_VERSION_63: u8 = 63;
-const PROTOCOL_VERSION_64: u8 = 64;
+const PROTOCOL_VERSION_1: u8 = 1;
 const MAX_BODIES_TO_SEND: usize = 256;
 const MAX_HEADERS_TO_SEND: usize = 512;
 const MAX_NODE_DATA_TO_SEND: usize = 1024;
@@ -137,10 +137,15 @@ const GET_NODE_DATA_PACKET: u8 = 0x0d;
 const NODE_DATA_PACKET: u8 = 0x0e;
 const GET_RECEIPTS_PACKET: u8 = 0x0f;
 const RECEIPTS_PACKET: u8 = 0x10;
+
+pub const ETH_PACKET_COUNT: u8 = 0x11;
+
 const GET_SNAPSHOT_MANIFEST_PACKET: u8 = 0x11;
 const SNAPSHOT_MANIFEST_PACKET: u8 = 0x12;
 const GET_SNAPSHOT_DATA_PACKET: u8 = 0x13;
 const SNAPSHOT_DATA_PACKET: u8 = 0x14;
+
+pub const SNAPSHOT_SYNC_PACKET_COUNT: u8 = 0x15;
 
 const HEADERS_TIMEOUT_SEC: f64 = 15f64;
 const BODIES_TIMEOUT_SEC: f64 = 10f64;
@@ -204,8 +209,8 @@ pub struct SyncStatus {
 impl SyncStatus {
 	/// Indicates if snapshot download is in progress
 	pub fn is_snapshot_syncing(&self) -> bool {
-		self.state == SyncState::SnapshotManifest 
-			|| self.state == SyncState::SnapshotData 
+		self.state == SyncState::SnapshotManifest
+			|| self.state == SyncState::SnapshotData
 			|| self.state == SyncState::SnapshotWaiting
 	}
 
@@ -354,7 +359,7 @@ impl ChainSync {
 		let last_imported_number = self.new_blocks.last_imported_block_number();
 		SyncStatus {
 			state: self.state.clone(),
-			protocol_version: if self.state == SyncState::SnapshotData { PROTOCOL_VERSION_64 } else { PROTOCOL_VERSION_63 },
+			protocol_version: PROTOCOL_VERSION_63,
 			network_id: self.network_id,
 			start_block_number: self.starting_block,
 			last_imported_block_number: Some(last_imported_number),
@@ -376,7 +381,7 @@ impl ChainSync {
 	/// Returns information on peers connections
 	pub fn peers(&self, io: &SyncIo) -> Vec<PeerInfoDigest> {
 		self.peers.iter()
-			.filter_map(|(&peer_id, ref peer_data)|
+			.filter_map(|(&peer_id, peer_data)|
 				io.peer_session_info(peer_id).map(|session_info|
 					PeerInfoDigest {
 						id: session_info.id.map(|id| id.hex()),
@@ -448,7 +453,7 @@ impl ChainSync {
 		self.init_downloaders(io.chain());
 		self.reset_and_continue(io);
 	}
-  
+
 	/// Restart sync after bad block has been detected. May end up re-downloading up to QUEUE_SIZE blocks
 	fn init_downloaders(&mut self, chain: &BlockChainClient) {
 		// Do not assume that the block queue/chain still has our last_imported_block
@@ -471,6 +476,7 @@ impl ChainSync {
 	/// Called by peer to report status
 	fn on_peer_status(&mut self, io: &mut SyncIo, peer_id: PeerId, r: &UntrustedRlp) -> Result<(), PacketDecodeError> {
 		let protocol_version: u8 = try!(r.val_at(0));
+		let warp_protocol = io.protocol_version(&WARP_SYNC_PROTOCOL_ID, peer_id) != 0;
 		let peer = PeerInfo {
 			protocol_version: protocol_version,
 			network_id: try!(r.val_at(1)),
@@ -485,8 +491,8 @@ impl ChainSync {
 			expired: false,
 			confirmation: if self.fork_block.is_none() { ForkConfirmation::Confirmed } else { ForkConfirmation::Unconfirmed },
 			asking_snapshot_data: None,
-			snapshot_hash: if protocol_version == PROTOCOL_VERSION_64 { Some(try!(r.val_at(5))) } else { None },
-			snapshot_number: if protocol_version == PROTOCOL_VERSION_64 { Some(try!(r.val_at(6))) } else { None },
+			snapshot_hash: if warp_protocol { Some(try!(r.val_at(5))) } else { None },
+			snapshot_number: if warp_protocol { Some(try!(r.val_at(6))) } else { None },
 			block_set: None,
 		};
 
@@ -511,7 +517,7 @@ impl ChainSync {
 			trace!(target: "sync", "Peer {} network id mismatch (ours: {}, theirs: {})", peer_id, self.network_id, peer.network_id);
 			return Ok(());
 		}
-		if peer.protocol_version != PROTOCOL_VERSION_64 && peer.protocol_version != PROTOCOL_VERSION_63 {
+		if (warp_protocol && peer.protocol_version != PROTOCOL_VERSION_1) || (!warp_protocol && peer.protocol_version != PROTOCOL_VERSION_63) {
 			io.disable_peer(peer_id);
 			trace!(target: "sync", "Peer {} unsupported eth protocol ({})", peer_id, peer.protocol_version);
 			return Ok(());
@@ -1011,7 +1017,7 @@ impl ChainSync {
 			return;
 		}
 		let (peer_latest, peer_difficulty, peer_snapshot_number, peer_snapshot_hash) = {
-			if let Some(ref peer) = self.peers.get_mut(&peer_id) {
+			if let Some(peer) = self.peers.get_mut(&peer_id) {
 				if peer.asking != PeerAsking::Nothing || !peer.can_sync() {
 					return;
 				}
@@ -1136,6 +1142,7 @@ impl ChainSync {
 	}
 
 	/// Checks if there are blocks fully downloaded that can be imported into the blockchain and does the import.
+	#[cfg_attr(feature="dev", allow(block_in_if_condition_stmt))]
 	fn collect_blocks(&mut self, io: &mut SyncIo, block_set: BlockSet) {
 		match block_set {
 			BlockSet::NewBlocks => {
@@ -1144,9 +1151,9 @@ impl ChainSync {
 				}
 			},
 			BlockSet::OldBlocks => {
-				 if self.old_blocks.as_mut().map_or(false, |downloader| { downloader.collect_blocks(io, false) == Err(DownloaderImportError::Invalid) }) {
-					 self.restart(io);
-				 } else if self.old_blocks.as_ref().map_or(false, |downloader| { downloader.is_complete() }) {
+				if self.old_blocks.as_mut().map_or(false, |downloader| { downloader.collect_blocks(io, false) == Err(DownloaderImportError::Invalid) }) {
+					self.restart(io);
+				} else if self.old_blocks.as_ref().map_or(false, |downloader| { downloader.is_complete() }) {
 					trace!(target: "sync", "Background block download is complete");
 					self.old_blocks = None;
 				}
@@ -1236,7 +1243,7 @@ impl ChainSync {
 				return true;
 			}
 		}
-		return false;
+		false
 	}
 
 	/// Generic request sender
@@ -1247,7 +1254,12 @@ impl ChainSync {
 			}
 			peer.asking = asking;
 			peer.ask_time = time::precise_time_s();
-			if let Err(e) = sync.send(peer_id, packet_id, packet) {
+			let result = if packet_id >= ETH_PACKET_COUNT {
+				sync.send_protocol(WARP_SYNC_PROTOCOL_ID, peer_id, packet_id, packet)
+			} else {
+				sync.send(peer_id, packet_id, packet)
+			};
+			if let Err(e) = result {
 				debug!(target:"sync", "Error sending request: {:?}", e);
 				sync.disable_peer(peer_id);
 			}
@@ -1264,8 +1276,9 @@ impl ChainSync {
 
 	/// Called when peer sends us new transactions
 	fn on_peer_transactions(&mut self, io: &mut SyncIo, peer_id: PeerId, r: &UntrustedRlp) -> Result<(), PacketDecodeError> {
-		// accepting transactions once only fully synced
-		if !io.is_chain_queue_empty() {
+		// Accept transactions only when fully synced
+		if !io.is_chain_queue_empty() || self.state != SyncState::Idle || self.state != SyncState::NewBlocks {
+			trace!(target: "sync", "{} Ignoring transactions while syncing", peer_id);
 			return Ok(());
 		}
 		if !self.peers.get(&peer_id).map_or(false, |p| p.can_sync()) {
@@ -1291,17 +1304,17 @@ impl ChainSync {
 
 	/// Send Status message
 	fn send_status(&mut self, io: &mut SyncIo, peer: PeerId) -> Result<(), NetworkError> {
-		let protocol = io.eth_protocol_version(peer);
+		let warp_protocol = io.protocol_version(&WARP_SYNC_PROTOCOL_ID, peer) != 0;
+		let protocol = if warp_protocol { PROTOCOL_VERSION_1 } else { PROTOCOL_VERSION_63 };
 		trace!(target: "sync", "Sending status to {}, protocol version {}", peer, protocol);
-		let pv64 = protocol >= PROTOCOL_VERSION_64;
-		let mut packet = RlpStream::new_list(if pv64 { 7 } else { 5 });
+		let mut packet = RlpStream::new_list(if warp_protocol { 7 } else { 5 });
 		let chain = io.chain().chain_info();
 		packet.append(&(protocol as u32));
 		packet.append(&self.network_id);
 		packet.append(&chain.total_difficulty);
 		packet.append(&chain.best_block_hash);
 		packet.append(&chain.genesis_hash);
-		if pv64 {
+		if warp_protocol {
 			let manifest = io.snapshot_service().manifest();
 			let block_number = manifest.as_ref().map_or(0, |m| m.block_number);
 			let manifest_hash = manifest.map_or(H256::new(), |m| m.into_rlp().sha3());
@@ -1354,14 +1367,18 @@ impl ChainSync {
 		let mut data = Bytes::new();
 		let inc = (skip + 1) as BlockNumber;
 		let overlay = io.chain_overlay().read();
+
 		while number <= last && count < max_count {
 			if let Some(hdr) = overlay.get(&number) {
 				trace!(target: "sync", "{}: Returning cached fork header", peer_id);
-				data.extend(hdr);
+				data.extend_from_slice(hdr);
 				count += 1;
 			} else if let Some(mut hdr) = io.chain().block_header(BlockID::Number(number)) {
 				data.append(&mut hdr);
 				count += 1;
+			} else {
+				// No required block.
+				break;
 			}
 			if reverse {
 				if number <= inc || number == 0 {
@@ -1411,16 +1428,18 @@ impl ChainSync {
 		}
 		count = min(count, MAX_NODE_DATA_TO_SEND);
 		let mut added = 0usize;
-		let mut data = Bytes::new();
+		let mut data = Vec::new();
 		for i in 0..count {
-			if let Some(mut hdr) = io.chain().state_data(&try!(r.val_at::<H256>(i))) {
-				data.append(&mut hdr);
+			if let Some(hdr) = io.chain().state_data(&try!(r.val_at::<H256>(i))) {
+				data.push(hdr);
 				added += 1;
 			}
 		}
 		trace!(target: "sync", "{} -> GetNodeData: return {} entries", peer_id, added);
 		let mut rlp = RlpStream::new_list(added);
-		rlp.append_raw(&data, added);
+		for d in data.into_iter() {
+			rlp.append(&d);
+		}
 		Ok(Some((NODE_DATA_PACKET, rlp)))
 	}
 
@@ -1471,7 +1490,7 @@ impl ChainSync {
 		Ok(Some((SNAPSHOT_MANIFEST_PACKET, rlp)))
 	}
 
-	/// Respond to GetSnapshotManifest request
+	/// Respond to GetSnapshotData request
 	fn return_snapshot_data(io: &SyncIo, r: &UntrustedRlp, peer_id: PeerId) -> RlpResponseResult {
 		let hash: H256 = try!(r.val_at(0));
 		trace!(target: "sync", "{} -> GetSnapshotData {:?}", peer_id, hash);
@@ -1560,7 +1579,7 @@ impl ChainSync {
 			SNAPSHOT_MANIFEST_PACKET => self.on_snapshot_manifest(io, peer, &rlp),
 			SNAPSHOT_DATA_PACKET => self.on_snapshot_data(io, peer, &rlp),
 			_ => {
-				debug!(target: "sync", "Unknown packet {}", packet_id);
+				debug!(target: "sync", "{}: Unknown packet {}", peer, packet_id);
 				Ok(())
 			}
 		};
@@ -1691,7 +1710,7 @@ impl ChainSync {
 					self.send_packet(io, *peer_id, NEW_BLOCK_PACKET, rlp);
 				}
 			}
-			if let Some(ref mut peer) = self.peers.get_mut(&peer_id) {
+			if let Some(ref mut peer) = self.peers.get_mut(peer_id) {
 				peer.latest_hash = chain_info.best_block_hash.clone();
 			}
 			sent += 1;
@@ -1709,7 +1728,7 @@ impl ChainSync {
 			sent += match ChainSync::create_new_hashes_rlp(io.chain(), &last_parent, &chain_info.best_block_hash) {
 				Some(rlp) => {
 					{
-						if let Some(ref mut peer) = self.peers.get_mut(&peer_id) {
+						if let Some(ref mut peer) = self.peers.get_mut(peer_id) {
 							peer.latest_hash = chain_info.best_block_hash.clone();
 						}
 					}
@@ -1777,7 +1796,7 @@ impl ChainSync {
 		// Send RLPs
 		let sent = lucky_peers.len();
 		if sent > 0 {
-			for (peer_id, rlp) in lucky_peers.into_iter() {
+			for (peer_id, rlp) in lucky_peers {
 				self.send_packet(io, peer_id, TRANSACTIONS_PACKET, rlp);
 			}
 
@@ -2009,7 +2028,9 @@ mod tests {
 		assert!(rlp_result.is_some());
 
 		// the length of one rlp-encoded hashe
-		assert_eq!(34, rlp_result.unwrap().1.out().len());
+		let rlp = rlp_result.unwrap().1.out();
+		let rlp = Rlp::new(&rlp);
+		assert_eq!(1, rlp.item_count());
 
 		io.sender = Some(2usize);
 

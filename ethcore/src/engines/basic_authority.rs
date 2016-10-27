@@ -16,14 +16,20 @@
 
 //! A blockchain engine that supports a basic, non-BFT proof-of-authority.
 
-use common::*;
 use ethkey::{recover, public_to_address};
 use account_provider::AccountProvider;
 use block::*;
+use builtin::Builtin;
 use spec::CommonParams;
 use engines::Engine;
+use env_info::EnvInfo;
+use error::{BlockError, Error};
 use evm::Schedule;
 use ethjson;
+use header::Header;
+use transaction::SignedTransaction;
+
+use util::*;
 
 /// `BasicAuthority` params.
 #[derive(Debug, PartialEq)]
@@ -184,10 +190,13 @@ impl Header {
 
 #[cfg(test)]
 mod tests {
-	use common::*;
+	use util::*;
 	use block::*;
+	use env_info::EnvInfo;
+	use error::{BlockError, Error};
 	use tests::helpers::*;
 	use account_provider::AccountProvider;
+	use header::Header;
 	use spec::Spec;
 
 	/// Create a new test chain spec with `BasicAuthority` consensus engine.
@@ -256,7 +265,7 @@ mod tests {
 		let mut db = db_result.take();
 		spec.ensure_db_good(&mut db).unwrap();
 		let last_hashes = Arc::new(vec![genesis_header.hash()]);
-		let b = OpenBlock::new(engine, Default::default(), false, db, &genesis_header, last_hashes, addr, (3141562.into(), 31415620.into()), vec![], None).unwrap();
+		let b = OpenBlock::new(engine, Default::default(), false, db, &genesis_header, last_hashes, addr, (3141562.into(), 31415620.into()), vec![]).unwrap();
 		let b = b.close_and_lock();
 		let seal = engine.generate_seal(b.block(), Some(&tap)).unwrap();
 		assert!(b.try_seal(engine, seal).is_ok());

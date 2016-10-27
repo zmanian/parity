@@ -323,8 +323,7 @@ impl MiningBlockChainClient for TestBlockChainClient {
 			Arc::new(last_hashes),
 			author,
 			gas_range_target,
-			extra_data,
-			None,
+			extra_data
 		).expect("Opening block for tests will not fail.");
 		// TODO [todr] Override timestamp for predictability (set_timestamp_now kind of sucks)
 		open_block.set_timestamp(*self.latest_block_timestamp.read());

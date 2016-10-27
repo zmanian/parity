@@ -18,11 +18,11 @@ use std::collections::BTreeMap;
 use util::Address;
 use builtin::Builtin;
 use engines::Engine;
+use env_info::EnvInfo;
 use spec::CommonParams;
 use evm::Schedule;
-use env_info::EnvInfo;
 use block::ExecutedBlock;
-use common::Bytes;
+use util::Bytes;
 use account_provider::AccountProvider;
 
 /// An engine which does not provide any consensus mechanism, just seals blocks internally.
@@ -67,10 +67,11 @@ impl Engine for InstantSeal {
 
 #[cfg(test)]
 mod tests {
-	use common::*;
+	use util::*;
 	use tests::helpers::*;
 	use account_provider::AccountProvider;
 	use spec::Spec;
+	use header::Header;
 	use block::*;
 
 	#[test]
@@ -85,7 +86,7 @@ mod tests {
 		let mut db = db_result.take();
 		spec.ensure_db_good(&mut db).unwrap();
 		let last_hashes = Arc::new(vec![genesis_header.hash()]);
-		let b = OpenBlock::new(engine, Default::default(), false, db, &genesis_header, last_hashes, addr, (3141562.into(), 31415620.into()), vec![], None).unwrap();
+		let b = OpenBlock::new(engine, Default::default(), false, db, &genesis_header, last_hashes, addr, (3141562.into(), 31415620.into()), vec![]).unwrap();
 		let b = b.close_and_lock();
 		// Seal with empty AccountProvider.
 		let seal = engine.generate_seal(b.block(), Some(&tap)).unwrap();

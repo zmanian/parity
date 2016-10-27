@@ -63,7 +63,7 @@ impl PodAccount {
 		stream.out()
 	}
 
-	/// Place additional data into given hash DB, returning the storage root.
+	/// Place additional data into given hash DB.
 	pub fn insert_additional(&self, db: &mut AccountDBMut) {
 		match self.code {
 			Some(ref c) if !c.is_empty() => { db.insert(c); }
@@ -163,7 +163,7 @@ pub fn diff_pod(pre: Option<&PodAccount>, post: Option<&PodAccount>) -> Option<A
 
 #[cfg(test)]
 mod test {
-	use common::*;
+	use util::*;
 	use types::account_diff::*;
 	use super::{PodAccount, diff_pod};
 

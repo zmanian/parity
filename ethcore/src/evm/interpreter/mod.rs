@@ -29,11 +29,13 @@ use self::memory::Memory;
 pub use self::shared_cache::SharedCache;
 
 use std::marker::PhantomData;
-use common::*;
+use action_params::{ActionParams, ActionValue};
 use types::executed::CallType;
-use super::instructions::{self, Instruction, InstructionInfo};
+use evm::instructions::{self, Instruction, InstructionInfo};
 use evm::{self, MessageCallResult, ContractCreateResult, GasLeft, CostType};
 use bit_set::BitSet;
+
+use util::*;
 
 type CodePosition = usize;
 type ProgramCounter = usize;
@@ -52,14 +54,14 @@ const TWO_POW_248: U256 = U256([0, 0, 0, 0x100000000000000]); //0x1 00000000 000
 /// Abstraction over raw vector of Bytes. Easier state management of PC.
 struct CodeReader<'a> {
 	position: ProgramCounter,
-	code: &'a Bytes
+	code: &'a [u8]
 }
 
 #[cfg_attr(feature="dev", allow(len_without_is_empty))]
 impl<'a> CodeReader<'a> {
 
 	/// Create new code reader - starting at position 0.
-	fn new(code: &'a Bytes) -> Self {
+	fn new(code: &'a [u8]) -> Self {
 		CodeReader {
 			position: 0,
 			code: code,
