@@ -20,3 +20,7 @@ ethcore-util = { path = "../util" }
 
 [features]
 evm-debug = ["ethcore/evm-debug-tests"]
+
+[profile.release]
+debug = true
+

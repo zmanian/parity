@@ -22,7 +22,7 @@ use engines::Engine;
 use types::executed::CallType;
 use env_info::EnvInfo;
 use error::ExecutionError;
-use evm::{self, Ext, Factory, Finalize};
+use evm::{self, Ext, Factory};
 use externalities::*;
 use trace::{FlatTrace, Tracer, NoopTracer, ExecutiveTracer, VMTrace, VMTracer, ExecutiveVMTracer, NoopVMTracer};
 use transaction::{Action, SignedTransaction};
@@ -220,23 +220,23 @@ impl<'a> Executive<'a> {
 
 		let depth_threshold = ::io::LOCAL_STACK_SIZE.with(|sz| sz.get() / STACK_SIZE_PER_DEPTH);
 
-		// Ordinary execution - keep VM in same thread
+		// Ordinary execution - keep VM in the same thread
 		if (self.depth + 1) % depth_threshold != 0 {
 			let vm_factory = self.vm_factory;
-			let mut ext = self.as_externalities(OriginInfo::from(&params), unconfirmed_substate, output_policy, tracer, vm_tracer);
+			let ext = self.as_externalities(OriginInfo::from(&params), unconfirmed_substate, output_policy, tracer, vm_tracer);
 			trace!(target: "executive", "ext.schedule.have_delegate_call: {}", ext.schedule().have_delegate_call);
-			return vm_factory.create(params.gas).exec(params, &mut ext).finalize(ext);
+			return vm_factory.create(params.gas).exec(params, ext);
 		}
 
-		// Start in new thread to reset stack
+		// Start in a new thread to reset the stack.
 		// TODO [todr] No thread builder yet, so we need to reset once for a while
 		// https://github.com/aturon/crossbeam/issues/16
 		crossbeam::scope(|scope| {
 			let vm_factory = self.vm_factory;
-			let mut ext = self.as_externalities(OriginInfo::from(&params), unconfirmed_substate, output_policy, tracer, vm_tracer);
+			let ext = self.as_externalities(OriginInfo::from(&params), unconfirmed_substate, output_policy, tracer, vm_tracer);
 
 			scope.spawn(move || {
-				vm_factory.create(params.gas).exec(params, &mut ext).finalize(ext)
+				vm_factory.create(params.gas).exec(params, ext)
 			})
 		}).join()
 	}

@@ -21,7 +21,7 @@ use state::{State, Substate};
 use engines::Engine;
 use env_info::EnvInfo;
 use executive::*;
-use evm::{self, Schedule, Ext, ContractCreateResult, MessageCallResult, Factory};
+use evm::{self, Schedule, Ext, ContractCreateResult, MessageCallResult, Factory, CostType};
 use types::executed::CallType;
 use trace::{Tracer, VMTracer};
 
@@ -296,8 +296,8 @@ impl<'a, T, V> Ext for Externalities<'a, T, V> where T: 'a + Tracer, V: 'a + VMT
 		self.substate.sstore_clears_count = self.substate.sstore_clears_count + U256::one();
 	}
 
-	fn trace_prepare_execute(&mut self, pc: usize, instruction: u8, gas_cost: &U256) -> bool {
-		self.vm_tracer.trace_prepare_execute(pc, instruction, gas_cost)
+	fn trace_prepare_execute<Gas: CostType>(&mut self, pc: usize, instruction: u8, gas_cost: &Gas) -> bool {
+		self.vm_tracer.trace_prepare_execute(pc, instruction, &gas_cost.as_u256())
 	}
 
 	fn trace_executed(&mut self, gas_used: U256, stack_push: &[U256], mem_diff: Option<(usize, &[u8])>, store_diff: Option<(U256, U256)>) {

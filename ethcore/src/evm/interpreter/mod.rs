@@ -32,7 +32,7 @@ use std::marker::PhantomData;
 use action_params::{ActionParams, ActionValue};
 use types::executed::CallType;
 use evm::instructions::{self, Instruction, InstructionInfo};
-use evm::{self, MessageCallResult, ContractCreateResult, GasLeft, CostType};
+use evm::{self, MessageCallResult, ContractCreateResult, CostType, Schedule};
 use bit_set::BitSet;
 
 use util::*;
@@ -92,15 +92,19 @@ enum InstructionResult<Gas> {
 
 
 /// Intepreter EVM implementation
-pub struct Interpreter<Cost: CostType> {
+pub struct Interpreter<Cost, Ext> {
 	mem: Vec<u8>,
+	stack: VecStack<U256>,
 	cache: Arc<SharedCache>,
-	_type: PhantomData<Cost>,
+	_gas: PhantomData<Cost>,
+	_ext: PhantomData<Ext>,
 }
 
-impl<Cost: CostType> evm::Evm for Interpreter<Cost> {
-	fn exec(&mut self, params: ActionParams, ext: &mut evm::Ext) -> evm::Result<GasLeft> {
+impl<Cost: CostType, Ext: evm::Ext> evm::Evm<Ext> for Interpreter<Cost, Ext> {
+	fn exec(&mut self, params: ActionParams, mut ext: Ext) -> evm::Result<U256> {
 		self.mem.clear();
+		self.stack.clear();
+		self.stack.expand(ext.schedule().stack_limit);
 
 		let mut informant = informant::EvmInformant::new(ext.depth());
 
@@ -108,7 +112,6 @@ impl<Cost: CostType> evm::Evm for Interpreter<Cost> {
 		let valid_jump_destinations = self.cache.jump_destinations(&params.code_hash, code);
 
 		let mut gasometer = Gasometer::<Cost>::new(try!(Cost::from_u256(params.gas)));
-		let mut stack = VecStack::with_capacity(ext.schedule().stack_limit, U256::zero());
 		let mut reader = CodeReader::new(code);
 		let infos = &*instructions::INSTRUCTIONS;
 
@@ -117,28 +120,28 @@ impl<Cost: CostType> evm::Evm for Interpreter<Cost> {
 			reader.position += 1;
 
 			let info = &infos[instruction as usize];
-			try!(self.verify_instruction(ext, instruction, info, &stack));
+			try!(self.verify_instruction(ext.schedule(), instruction, info));
 
 			// Calculate gas cost
-			let requirements = try!(gasometer.requirements(ext, instruction, info, &stack, self.mem.size()));
+			let requirements = try!(gasometer.requirements(&mut ext, instruction, info, &self.stack, self.mem.size()));
 			// TODO: make compile-time removable if too much of a performance hit.
-			let trace_executed = ext.trace_prepare_execute(reader.position - 1, instruction, &requirements.gas_cost.as_u256());
+			let trace_executed = ext.trace_prepare_execute(reader.position - 1, instruction, &requirements.gas_cost);
 
 			try!(gasometer.verify_gas(&requirements.gas_cost));
 			self.mem.expand(requirements.memory_required_size);
 			gasometer.current_mem_gas = requirements.memory_total_gas;
 			gasometer.current_gas = gasometer.current_gas - requirements.gas_cost;
 
-			evm_debug!({ informant.before_instruction(reader.position, instruction, info, &gasometer.current_gas, &stack) });
+			evm_debug!({ informant.before_instruction(reader.position, instruction, info, &gasometer.current_gas, &self.stack) });
 
 			let (mem_written, store_written) = match trace_executed {
-				true => (Self::mem_written(instruction, &stack), Self::store_written(instruction, &stack)),
+				true => (Self::mem_written(instruction, &self.stack), Self::store_written(instruction, &self.stack)),
 				false => (None, None),
 			};
 
 			// Execute instruction
 			let result = try!(self.exec_instruction(
-				gasometer.current_gas, &params, ext, instruction, &mut reader, &mut stack, requirements.provide_gas
+				&mut ext, gasometer.current_gas, &params, instruction, &mut reader, requirements.provide_gas
 			));
 
 			evm_debug!({ informant.after_instruction(instruction) });
@@ -148,7 +151,9 @@ impl<Cost: CostType> evm::Evm for Interpreter<Cost> {
 			}
 
 			if trace_executed {
-				ext.trace_executed(gasometer.current_gas.as_u256(), stack.peek_top(info.ret), mem_written.map(|(o, s)| (o, &(self.mem[o..(o + s)]))), store_written);
+				let stack = self.stack.peek_top(info.ret);
+				let mem = mem_written.map(|(o, s)| (o, &(self.mem[o..(o + s)])));
+				ext.trace_executed(gasometer.current_gas.as_u256(), stack, mem, store_written);
 			}
 
 			// Advance
@@ -159,29 +164,32 @@ impl<Cost: CostType> evm::Evm for Interpreter<Cost> {
 				},
 				InstructionResult::StopExecutionNeedsReturn(gas, off, size) => {
 					informant.done();
-					return Ok(GasLeft::NeedsReturn(gas.as_u256(), self.mem.read_slice(off, size)));
+
+					let slice = self.mem.read_slice(off, size);
+					return ext.ret(&gas.as_u256(), slice);
 				},
 				InstructionResult::StopExecution => break,
 				_ => {},
 			}
 		}
 		informant.done();
-		Ok(GasLeft::Known(gasometer.current_gas.as_u256()))
+		Ok(gasometer.current_gas.as_u256())
 	}
 }
 
-impl<Cost: CostType> Interpreter<Cost> {
+impl<Cost: CostType, Ext: evm::Ext> Interpreter<Cost, Ext> {
 	/// Create a new `Interpreter` instance with shared cache.
-	pub fn new(cache: Arc<SharedCache>) -> Interpreter<Cost> {
+	pub fn new(cache: Arc<SharedCache>) -> Self {
 		Interpreter {
 			mem: Vec::new(),
+			stack: VecStack::with_capacity(1024, U256::zero()),
 			cache: cache,
-			_type: PhantomData::default(),
+			_gas: PhantomData,
+			_ext: PhantomData,
 		}
 	}
 
-	fn verify_instruction(&self, ext: &evm::Ext, instruction: Instruction, info: &InstructionInfo, stack: &Stack<U256>) -> evm::Result<()> {
-		let schedule = ext.schedule();
+	fn verify_instruction(&self, schedule: &Schedule, instruction: Instruction, info: &InstructionInfo) -> evm::Result<()> {
 
 		if !schedule.have_delegate_call && instruction == instructions::DELEGATECALL {
 			return Err(evm::Error::BadInstruction {
@@ -195,13 +203,13 @@ impl<Cost: CostType> Interpreter<Cost> {
 			});
 		}
 
-		if !stack.has(info.args) {
+		if !self.stack.has(info.args) {
 			Err(evm::Error::StackUnderflow {
 				instruction: info.name,
 				wanted: info.args,
-				on_stack: stack.size()
+				on_stack: self.stack.size()
 			})
-		} else if stack.size() - info.args + info.ret > schedule.stack_limit {
+		} else if self.stack.size() - info.args + info.ret > schedule.stack_limit {
 			Err(evm::Error::OutOfStack {
 				instruction: info.name,
 				wanted: info.ret - info.args,
@@ -240,25 +248,24 @@ impl<Cost: CostType> Interpreter<Cost> {
 	#[cfg_attr(feature="dev", allow(too_many_arguments))]
 	fn exec_instruction(
 		&mut self,
+		ext: &mut Ext,
 		gas: Cost,
 		params: &ActionParams,
-		ext: &mut evm::Ext,
 		instruction: Instruction,
 		code: &mut CodeReader,
-		stack: &mut Stack<U256>,
 		provided: Option<Cost>
 	) -> evm::Result<InstructionResult<Cost>> {
 		match instruction {
 			instructions::JUMP => {
-				let jump = stack.pop_back();
+				let jump = self.stack.pop_back();
 				return Ok(InstructionResult::JumpToPosition(
 					jump
 				));
 			},
 			instructions::JUMPI => {
-				let jump = stack.pop_back();
-				let condition = stack.pop_back();
-				if !self.is_zero(&condition) {
+				let jump = self.stack.pop_back();
+				let condition = self.stack.pop_back();
+				if !condition.is_zero() {
 					return Ok(InstructionResult::JumpToPosition(
 						jump
 					));
@@ -268,48 +275,48 @@ impl<Cost: CostType> Interpreter<Cost> {
 				// ignore
 			},
 			instructions::CREATE => {
-				let endowment = stack.pop_back();
-				let init_off = stack.pop_back();
-				let init_size = stack.pop_back();
+				let endowment = self.stack.pop_back();
+				let init_off = self.stack.pop_back();
+				let init_size = self.stack.pop_back();
 				let create_gas = provided.expect("`provided` comes through Self::exec from `Gasometer::get_gas_cost_mem`; `gas_gas_mem_cost` guarantees `Some` when instruction is `CALL`/`CALLCODE`/`DELEGATECALL`/`CREATE`; this is `CREATE`; qed");
 
 				let contract_code = self.mem.read_slice(init_off, init_size);
 				let can_create = ext.balance(&params.address) >= endowment && ext.depth() < ext.schedule().max_depth;
 
 				if !can_create {
-					stack.push(U256::zero());
+					self.stack.push(U256::zero());
 					return Ok(InstructionResult::UnusedGas(create_gas));
 				}
 
 				let create_result = ext.create(&create_gas.as_u256(), &endowment, contract_code);
 				return match create_result {
 					ContractCreateResult::Created(address, gas_left) => {
-						stack.push(address_to_u256(address));
+						self.stack.push(address_to_u256(address));
 						Ok(InstructionResult::UnusedGas(Cost::from_u256(gas_left).expect("Gas left cannot be greater.")))
 					},
 					ContractCreateResult::Failed => {
-						stack.push(U256::zero());
+						self.stack.push(U256::zero());
 						Ok(InstructionResult::Ok)
 					}
 				};
 			},
 			instructions::CALL | instructions::CALLCODE | instructions::DELEGATECALL => {
 				assert!(ext.schedule().call_value_transfer_gas > ext.schedule().call_stipend, "overflow possible");
-				stack.pop_back();
+				self.stack.pop_back();
 				let call_gas = provided.expect("`provided` comes through Self::exec from `Gasometer::get_gas_cost_mem`; `gas_gas_mem_cost` guarantees `Some` when instruction is `CALL`/`CALLCODE`/`DELEGATECALL`/`CREATE`; this is one of `CALL`/`CALLCODE`/`DELEGATECALL`; qed");
-				let code_address = stack.pop_back();
+				let code_address = self.stack.pop_back();
 				let code_address = u256_to_address(&code_address);
 
 				let value = if instruction == instructions::DELEGATECALL {
 					None
 				} else {
-					Some(stack.pop_back())
+					Some(self.stack.pop_back())
 				};
 
-				let in_off = stack.pop_back();
-				let in_size = stack.pop_back();
-				let out_off = stack.pop_back();
-				let out_size = stack.pop_back();
+				let in_off = self.stack.pop_back();
+				let in_size = self.stack.pop_back();
+				let out_off = self.stack.pop_back();
+				let out_size = self.stack.pop_back();
 
 				// Add stipend (only CALL|CALLCODE when value > 0)
 				let call_gas = call_gas + value.map_or_else(|| Cost::from(0), |val| match val.is_zero() {
@@ -333,7 +340,7 @@ impl<Cost: CostType> Interpreter<Cost> {
 
 				let can_call = has_balance && ext.depth() < ext.schedule().max_depth;
 				if !can_call {
-					stack.push(U256::zero());
+					self.stack.push(U256::zero());
 					return Ok(InstructionResult::UnusedGas(call_gas));
 				}
 
@@ -347,18 +354,18 @@ impl<Cost: CostType> Interpreter<Cost> {
 
 				return match call_result {
 					MessageCallResult::Success(gas_left) => {
-						stack.push(U256::one());
+						self.stack.push(U256::one());
 						Ok(InstructionResult::UnusedGas(Cost::from_u256(gas_left).expect("Gas left cannot be greater then current one")))
 					},
 					MessageCallResult::Failed  => {
-						stack.push(U256::zero());
+						self.stack.push(U256::zero());
 						Ok(InstructionResult::Ok)
 					}
 				};
 			},
 			instructions::RETURN => {
-				let init_off = stack.pop_back();
-				let init_size = stack.pop_back();
+				let init_off = self.stack.pop_back();
+				let init_size = self.stack.pop_back();
 
 				return Ok(InstructionResult::StopExecutionNeedsReturn(gas, init_off, init_size))
 			},
@@ -366,16 +373,16 @@ impl<Cost: CostType> Interpreter<Cost> {
 				return Ok(InstructionResult::StopExecution);
 			},
 			instructions::SUICIDE => {
-				let address = stack.pop_back();
+				let address = self.stack.pop_back();
 				ext.suicide(&u256_to_address(&address));
 				return Ok(InstructionResult::StopExecution);
 			},
 			instructions::LOG0...instructions::LOG4 => {
 				let no_of_topics = instructions::get_log_topics(instruction);
 
-				let offset = stack.pop_back();
-				let size = stack.pop_back();
-				let topics = stack.pop_n(no_of_topics)
+				let offset = self.stack.pop_back();
+				let size = self.stack.pop_back();
+				let topics = self.stack.pop_n(no_of_topics)
 					.iter()
 					.map(H256::from)
 					.collect();
@@ -384,74 +391,74 @@ impl<Cost: CostType> Interpreter<Cost> {
 			instructions::PUSH1...instructions::PUSH32 => {
 				let bytes = instructions::get_push_bytes(instruction);
 				let val = code.read(bytes);
-				stack.push(val);
+				self.stack.push(val);
 			},
 			instructions::MLOAD => {
-				let word = self.mem.read(stack.pop_back());
-				stack.push(U256::from(word));
+				let word = self.mem.read(self.stack.pop_back());
+				self.stack.push(U256::from(word));
 			},
 			instructions::MSTORE => {
-				let offset = stack.pop_back();
-				let word = stack.pop_back();
+				let offset = self.stack.pop_back();
+				let word = self.stack.pop_back();
 				Memory::write(&mut self.mem, offset, word);
 			},
 			instructions::MSTORE8 => {
-				let offset = stack.pop_back();
-				let byte = stack.pop_back();
+				let offset = self.stack.pop_back();
+				let byte = self.stack.pop_back();
 				self.mem.write_byte(offset, byte);
 			},
 			instructions::MSIZE => {
-				stack.push(U256::from(self.mem.size()));
+				self.stack.push(U256::from(self.mem.size()));
 			},
 			instructions::SHA3 => {
-				let offset = stack.pop_back();
-				let size = stack.pop_back();
+				let offset = self.stack.pop_back();
+				let size = self.stack.pop_back();
 				let sha3 = self.mem.read_slice(offset, size).sha3();
-				stack.push(U256::from(&*sha3));
+				self.stack.push(U256::from(&*sha3));
 			},
 			instructions::SLOAD => {
-				let key = H256::from(&stack.pop_back());
+				let key = H256::from(&self.stack.pop_back());
 				let word = U256::from(&*ext.storage_at(&key));
-				stack.push(word);
+				self.stack.push(word);
 			},
 			instructions::SSTORE => {
-				let address = H256::from(&stack.pop_back());
-				let val = stack.pop_back();
+				let address = H256::from(&self.stack.pop_back());
+				let val = self.stack.pop_back();
 
 				let current_val = U256::from(&*ext.storage_at(&address));
 				// Increase refund for clear
-				if !self.is_zero(&current_val) && self.is_zero(&val) {
+				if !current_val.is_zero() && val.is_zero() {
 					ext.inc_sstore_clears();
 				}
 				ext.set_storage(address, H256::from(&val));
 			},
 			instructions::PC => {
-				stack.push(U256::from(code.position - 1));
+				self.stack.push(U256::from(code.position - 1));
 			},
 			instructions::GAS => {
-				stack.push(gas.as_u256());
+				self.stack.push(gas.as_u256());
 			},
 			instructions::ADDRESS => {
-				stack.push(address_to_u256(params.address.clone()));
+				self.stack.push(address_to_u256(params.address.clone()));
 			},
 			instructions::ORIGIN => {
-				stack.push(address_to_u256(params.origin.clone()));
+				self.stack.push(address_to_u256(params.origin.clone()));
 			},
 			instructions::BALANCE => {
-				let address = u256_to_address(&stack.pop_back());
+				let address = u256_to_address(&self.stack.pop_back());
 				let balance = ext.balance(&address);
-				stack.push(balance);
+				self.stack.push(balance);
 			},
 			instructions::CALLER => {
-				stack.push(address_to_u256(params.sender.clone()));
+				self.stack.push(address_to_u256(params.sender.clone()));
 			},
 			instructions::CALLVALUE => {
-				stack.push(match params.value {
+				self.stack.push(match params.value {
 					ActionValue::Transfer(val) | ActionValue::Apparent(val) => val
 				});
 			},
 			instructions::CALLDATALOAD => {
-				let big_id = stack.pop_back();
+				let big_id = self.stack.pop_back();
 				let id = big_id.low_u64() as usize;
 				let max = id.wrapping_add(32);
 				if let Some(data) = params.data.as_ref() {
@@ -459,70 +466,70 @@ impl<Cost: CostType> Interpreter<Cost> {
 					if id < bound && big_id < U256::from(data.len()) {
 						let mut v = [0u8; 32];
 						v[0..bound-id].clone_from_slice(&data[id..bound]);
-						stack.push(U256::from(&v[..]))
+						self.stack.push(U256::from(&v[..]))
 					} else {
-						stack.push(U256::zero())
+						self.stack.push(U256::zero())
 					}
 				} else {
-					stack.push(U256::zero())
+					self.stack.push(U256::zero())
 				}
 			},
 			instructions::CALLDATASIZE => {
-				stack.push(U256::from(params.data.clone().map_or(0, |l| l.len())));
+				self.stack.push(U256::from(params.data.clone().map_or(0, |l| l.len())));
 			},
 			instructions::CODESIZE => {
-				stack.push(U256::from(code.len()));
+				self.stack.push(U256::from(code.len()));
 			},
 			instructions::EXTCODESIZE => {
-				let address = u256_to_address(&stack.pop_back());
+				let address = u256_to_address(&self.stack.pop_back());
 				let len = ext.extcodesize(&address);
-				stack.push(U256::from(len));
+				self.stack.push(U256::from(len));
 			},
 			instructions::CALLDATACOPY => {
-				self.copy_data_to_memory(stack, params.data.as_ref().map_or_else(|| &[] as &[u8], |d| &*d as &[u8]));
+				self.copy_data_to_memory(params.data.as_ref().map_or_else(|| &[] as &[u8], |d| &*d as &[u8]));
 			},
 			instructions::CODECOPY => {
-				self.copy_data_to_memory(stack, params.code.as_ref().map_or_else(|| &[] as &[u8], |c| &**c as &[u8]));
+				self.copy_data_to_memory(params.code.as_ref().map_or_else(|| &[] as &[u8], |c| &**c as &[u8]));
 			},
 			instructions::EXTCODECOPY => {
-				let address = u256_to_address(&stack.pop_back());
+				let address = u256_to_address(&self.stack.pop_back());
 				let code = ext.extcode(&address);
-				self.copy_data_to_memory(stack, &code);
+				self.copy_data_to_memory(&code);
 			},
 			instructions::GASPRICE => {
-				stack.push(params.gas_price.clone());
+				self.stack.push(params.gas_price.clone());
 			},
 			instructions::BLOCKHASH => {
-				let block_number = stack.pop_back();
+				let block_number = self.stack.pop_back();
 				let block_hash = ext.blockhash(&block_number);
-				stack.push(U256::from(&*block_hash));
+				self.stack.push(U256::from(&*block_hash));
 			},
 			instructions::COINBASE => {
-				stack.push(address_to_u256(ext.env_info().author.clone()));
+				self.stack.push(address_to_u256(ext.env_info().author.clone()));
 			},
 			instructions::TIMESTAMP => {
-				stack.push(U256::from(ext.env_info().timestamp));
+				self.stack.push(U256::from(ext.env_info().timestamp));
 			},
 			instructions::NUMBER => {
-				stack.push(U256::from(ext.env_info().number));
+				self.stack.push(U256::from(ext.env_info().number));
 			},
 			instructions::DIFFICULTY => {
-				stack.push(ext.env_info().difficulty.clone());
+				self.stack.push(ext.env_info().difficulty.clone());
 			},
 			instructions::GASLIMIT => {
-				stack.push(ext.env_info().gas_limit.clone());
+				self.stack.push(ext.env_info().gas_limit.clone());
 			},
 			_ => {
-				try!(self.exec_stack_instruction(instruction, stack));
+				try!(self.exec_stack_instruction(instruction));
 			}
 		};
 		Ok(InstructionResult::Ok)
 	}
 
-	fn copy_data_to_memory(&mut self, stack: &mut Stack<U256>, source: &[u8]) {
-		let dest_offset = stack.pop_back();
-		let source_offset = stack.pop_back();
-		let size = stack.pop_back();
+	fn copy_data_to_memory(&mut self, source: &[u8]) {
+		let dest_offset = self.stack.pop_back();
+		let source_offset = self.stack.pop_back();
+		let size = self.stack.pop_back();
 		let source_size = U256::from(source.len());
 
 		let output_end = match source_offset > source_size || size > source_size || source_offset + size > source_size {
@@ -558,51 +565,39 @@ impl<Cost: CostType> Interpreter<Cost> {
 		}
 	}
 
-	fn is_zero(&self, val: &U256) -> bool {
-		val.is_zero()
-	}
-
-	fn bool_to_u256(&self, val: bool) -> U256 {
-		if val {
-			U256::one()
-		} else {
-			U256::zero()
-		}
-	}
-
-	fn exec_stack_instruction(&self, instruction: Instruction, stack: &mut Stack<U256>) -> evm::Result<()> {
+	fn exec_stack_instruction(&mut self, instruction: Instruction) -> evm::Result<()> {
 		match instruction {
 			instructions::DUP1...instructions::DUP16 => {
 				let position = instructions::get_dup_position(instruction);
-				let val = stack.peek(position).clone();
-				stack.push(val);
+				let val = self.stack.peek(position).clone();
+				self.stack.push(val);
 			},
 			instructions::SWAP1...instructions::SWAP16 => {
 				let position = instructions::get_swap_position(instruction);
-				stack.swap_with_top(position)
+				self.stack.swap_with_top(position)
 			},
 			instructions::POP => {
-				stack.pop_back();
+				self.stack.pop_back();
 			},
 			instructions::ADD => {
-				let a = stack.pop_back();
-				let b = stack.pop_back();
-				stack.push(a.overflowing_add(b).0);
+				let a = self.stack.pop_back();
+				let b = self.stack.pop_back();
+				self.stack.push(a.overflowing_add(b).0);
 			},
 			instructions::MUL => {
-				let a = stack.pop_back();
-				let b = stack.pop_back();
-				stack.push(a.overflowing_mul(b).0);
+				let a = self.stack.pop_back();
+				let b = self.stack.pop_back();
+				self.stack.push(a.overflowing_mul(b).0);
 			},
 			instructions::SUB => {
-				let a = stack.pop_back();
-				let b = stack.pop_back();
-				stack.push(a.overflowing_sub(b).0);
+				let a = self.stack.pop_back();
+				let b = self.stack.pop_back();
+				self.stack.push(a.overflowing_sub(b).0);
 			},
 			instructions::DIV => {
-				let a = stack.pop_back();
-				let b = stack.pop_back();
-				stack.push(if !self.is_zero(&b) {
+				let a = self.stack.pop_back();
+				let b = self.stack.pop_back();
+				self.stack.push(if !b.is_zero() {
 					match b {
 						ONE => a,
 						TWO => a >> 1,
@@ -621,21 +616,21 @@ impl<Cost: CostType> Interpreter<Cost> {
 				});
 			},
 			instructions::MOD => {
-				let a = stack.pop_back();
-				let b = stack.pop_back();
-				stack.push(if !self.is_zero(&b) {
+				let a = self.stack.pop_back();
+				let b = self.stack.pop_back();
+				self.stack.push(if !b.is_zero() {
 					a.overflowing_rem(b).0
 				} else {
 					U256::zero()
 				});
 			},
 			instructions::SDIV => {
-				let (a, sign_a) = get_and_reset_sign(stack.pop_back());
-				let (b, sign_b) = get_and_reset_sign(stack.pop_back());
+				let (a, sign_a) = get_and_reset_sign(self.stack.pop_back());
+				let (b, sign_b) = get_and_reset_sign(self.stack.pop_back());
 
 				// -2^255
 				let min = (U256::one() << 255) - U256::one();
-				stack.push(if self.is_zero(&b) {
+				self.stack.push(if b.is_zero() {
 					U256::zero()
 				} else if a == min && b == !U256::zero() {
 					min
@@ -645,12 +640,12 @@ impl<Cost: CostType> Interpreter<Cost> {
 				});
 			},
 			instructions::SMOD => {
-				let ua = stack.pop_back();
-				let ub = stack.pop_back();
+				let ua = self.stack.pop_back();
+				let ub = self.stack.pop_back();
 				let (a, sign_a) = get_and_reset_sign(ua);
 				let b = get_and_reset_sign(ub).0;
 
-				stack.push(if !self.is_zero(&b) {
+				self.stack.push(if !b.is_zero() {
 					let c = a.overflowing_rem(b).0;
 					set_sign(c, sign_a)
 				} else {
@@ -658,84 +653,84 @@ impl<Cost: CostType> Interpreter<Cost> {
 				});
 			},
 			instructions::EXP => {
-				let base = stack.pop_back();
-				let expon = stack.pop_back();
+				let base = self.stack.pop_back();
+				let expon = self.stack.pop_back();
 				let res = base.overflowing_pow(expon).0;
-				stack.push(res);
+				self.stack.push(res);
 			},
 			instructions::NOT => {
-				let a = stack.pop_back();
-				stack.push(!a);
+				let a = self.stack.pop_back();
+				self.stack.push(!a);
 			},
 			instructions::LT => {
-				let a = stack.pop_back();
-				let b = stack.pop_back();
-				stack.push(self.bool_to_u256(a < b));
+				let a = self.stack.pop_back();
+				let b = self.stack.pop_back();
+				self.stack.push(bool_to_u256(a < b));
 			},
 			instructions::SLT => {
-				let (a, neg_a) = get_and_reset_sign(stack.pop_back());
-				let (b, neg_b) = get_and_reset_sign(stack.pop_back());
+				let (a, neg_a) = get_and_reset_sign(self.stack.pop_back());
+				let (b, neg_b) = get_and_reset_sign(self.stack.pop_back());
 
 				let is_positive_lt = a < b && !(neg_a | neg_b);
 				let is_negative_lt = a > b && (neg_a & neg_b);
 				let has_different_signs = neg_a && !neg_b;
 
-				stack.push(self.bool_to_u256(is_positive_lt | is_negative_lt | has_different_signs));
+				self.stack.push(bool_to_u256(is_positive_lt | is_negative_lt | has_different_signs));
 			},
 			instructions::GT => {
-				let a = stack.pop_back();
-				let b = stack.pop_back();
-				stack.push(self.bool_to_u256(a > b));
+				let a = self.stack.pop_back();
+				let b = self.stack.pop_back();
+				self.stack.push(bool_to_u256(a > b));
 			},
 			instructions::SGT => {
-				let (a, neg_a) = get_and_reset_sign(stack.pop_back());
-				let (b, neg_b) = get_and_reset_sign(stack.pop_back());
+				let (a, neg_a) = get_and_reset_sign(self.stack.pop_back());
+				let (b, neg_b) = get_and_reset_sign(self.stack.pop_back());
 
 				let is_positive_gt = a > b && !(neg_a | neg_b);
 				let is_negative_gt = a < b && (neg_a & neg_b);
 				let has_different_signs = !neg_a && neg_b;
 
-				stack.push(self.bool_to_u256(is_positive_gt | is_negative_gt | has_different_signs));
+				self.stack.push(bool_to_u256(is_positive_gt | is_negative_gt | has_different_signs));
 			},
 			instructions::EQ => {
-				let a = stack.pop_back();
-				let b = stack.pop_back();
-				stack.push(self.bool_to_u256(a == b));
+				let a = self.stack.pop_back();
+				let b = self.stack.pop_back();
+				self.stack.push(bool_to_u256(a == b));
 			},
 			instructions::ISZERO => {
-				let a = stack.pop_back();
-				stack.push(self.bool_to_u256(self.is_zero(&a)));
+				let a = self.stack.pop_back();
+				self.stack.push(bool_to_u256(a.is_zero()));
 			},
 			instructions::AND => {
-				let a = stack.pop_back();
-				let b = stack.pop_back();
-				stack.push(a & b);
+				let a = self.stack.pop_back();
+				let b = self.stack.pop_back();
+				self.stack.push(a & b);
 			},
 			instructions::OR => {
-				let a = stack.pop_back();
-				let b = stack.pop_back();
-				stack.push(a | b);
+				let a = self.stack.pop_back();
+				let b = self.stack.pop_back();
+				self.stack.push(a | b);
 			},
 			instructions::XOR => {
-				let a = stack.pop_back();
-				let b = stack.pop_back();
-				stack.push(a ^ b);
+				let a = self.stack.pop_back();
+				let b = self.stack.pop_back();
+				self.stack.push(a ^ b);
 			},
 			instructions::BYTE => {
-				let word = stack.pop_back();
-				let val = stack.pop_back();
+				let word = self.stack.pop_back();
+				let val = self.stack.pop_back();
 				let byte = match word < U256::from(32) {
 					true => (val >> (8 * (31 - word.low_u64() as usize))) & U256::from(0xff),
 					false => U256::zero()
 				};
-				stack.push(byte);
+				self.stack.push(byte);
 			},
 			instructions::ADDMOD => {
-				let a = stack.pop_back();
-				let b = stack.pop_back();
-				let c = stack.pop_back();
+				let a = self.stack.pop_back();
+				let b = self.stack.pop_back();
+				let c = self.stack.pop_back();
 
-				stack.push(if !self.is_zero(&c) {
+				self.stack.push(if !c.is_zero() {
 					// upcast to 512
 					let a5 = U512::from(a);
 					let res = a5.overflowing_add(U512::from(b)).0;
@@ -746,11 +741,11 @@ impl<Cost: CostType> Interpreter<Cost> {
 				});
 			},
 			instructions::MULMOD => {
-				let a = stack.pop_back();
-				let b = stack.pop_back();
-				let c = stack.pop_back();
+				let a = self.stack.pop_back();
+				let b = self.stack.pop_back();
+				let c = self.stack.pop_back();
 
-				stack.push(if !self.is_zero(&c) {
+				self.stack.push(if !c.is_zero() {
 					let a5 = U512::from(a);
 					let res = a5.overflowing_mul(U512::from(b)).0;
 					let x = res.overflowing_rem(U512::from(c)).0;
@@ -760,14 +755,14 @@ impl<Cost: CostType> Interpreter<Cost> {
 				});
 			},
 			instructions::SIGNEXTEND => {
-				let bit = stack.pop_back();
+				let bit = self.stack.pop_back();
 				if bit < U256::from(32) {
-					let number = stack.pop_back();
+					let number = self.stack.pop_back();
 					let bit_position = (bit.low_u64() * 8 + 7) as usize;
 
 					let bit = number.bit(bit_position);
 					let mask = (U256::one() << bit_position) - U256::one();
-					stack.push(if bit {
+					self.stack.push(if bit {
 						number | !mask
 					} else {
 						number & mask
@@ -785,17 +780,28 @@ impl<Cost: CostType> Interpreter<Cost> {
 
 }
 
+#[inline]
 fn get_and_reset_sign(value: U256) -> (U256, bool) {
 	let U256(arr) = value;
 	let sign = arr[3].leading_zeros() == 0;
 	(set_sign(value, sign), sign)
 }
 
+#[inline]
 fn set_sign(value: U256, sign: bool) -> U256 {
 	if sign {
 		(!U256::zero() ^ value).overflowing_add(U256::one()).0
 	} else {
 		value
+	}
+}
+
+#[inline]
+fn bool_to_u256(val: bool) -> U256 {
+	if val {
+		U256::one()
+	} else {
+		U256::zero()
 	}
 }
 

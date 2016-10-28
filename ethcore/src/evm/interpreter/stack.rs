@@ -35,6 +35,10 @@ pub trait Stack<T> {
 	fn size(&self) -> usize;
 	/// Returns all data on stack.
 	fn peek_top(&self, no_of_elems: usize) -> &[T];
+	/// Clears the stack
+	fn clear(&mut self);
+	/// Expands the size of the stack to given value
+	fn expand(&mut self, size: usize);
 }
 
 pub struct VecStack<S> {
@@ -52,6 +56,17 @@ impl<S : Copy> VecStack<S> {
 }
 
 impl<S : fmt::Display> Stack<S> for VecStack<S> {
+	fn expand(&mut self, size: usize) {
+		let capacity = self.stack.capacity();
+		if capacity < size {
+			self.stack.reserve(size - capacity);
+		}
+	}
+
+	fn clear(&mut self) {
+		self.stack.clear();
+	}
+
 	fn peek(&self, no_from_top: usize) -> &S {
 		&self.stack[self.stack.len() - no_from_top - 1]
 	}

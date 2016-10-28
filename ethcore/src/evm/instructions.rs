@@ -19,14 +19,16 @@
 pub type Instruction = u8;
 
 /// Returns true if given instruction is `PUSHN` instruction.
+#[inline]
 pub fn is_push(i: Instruction) -> bool {
 	i >= PUSH1 && i <= PUSH32
 }
 
 /// Returns number of bytes to read for `PUSHN` instruction
 /// PUSH1 -> 1
+#[inline]
 pub fn get_push_bytes(i: Instruction) -> usize {
-	assert!(is_push(i), "Only for PUSH instructions.");
+	debug_assert!(is_push(i), "Only for PUSH instructions.");
 	(i - PUSH1 + 1) as usize
 }
 
@@ -39,8 +41,9 @@ fn test_get_push_bytes() {
 
 /// Returns stack position of item to duplicate
 /// DUP1 -> 0
+#[inline]
 pub fn get_dup_position(i: Instruction) -> usize {
-	assert!(i >= DUP1 && i <= DUP16);
+	debug_assert!(i >= DUP1 && i <= DUP16);
 	(i - DUP1) as usize
 }
 
@@ -53,8 +56,9 @@ fn test_get_dup_position() {
 
 /// Returns stack position of item to SWAP top with
 /// SWAP1 -> 1
+#[inline]
 pub fn get_swap_position(i: Instruction) -> usize {
-	assert!(i >= SWAP1 && i <= SWAP16);
+	debug_assert!(i >= SWAP1 && i <= SWAP16);
 	(i - SWAP1 + 1) as usize
 }
 
@@ -67,8 +71,9 @@ fn test_get_swap_position() {
 
 /// Returns number of topcis to take from stack
 /// LOG0 -> 0
+#[inline]
 pub fn get_log_topics (i: Instruction) -> usize {
-	assert!(i >= LOG0 && i <= LOG4);
+	debug_assert!(i >= LOG0 && i <= LOG4);
 	(i - LOG0) as usize
 }
 

@@ -17,7 +17,7 @@
 //! Just in time compiler execution environment.
 use util::*;
 use evmjit;
-use evm::{self, GasLeft};
+use evm;
 use types::executed::CallType;
 
 /// Should be used to convert jit types to ethcore
@@ -313,13 +313,23 @@ impl<'a> evmjit::Ext for ExtAdapter<'a> {
 	}
 }
 
-#[derive(Default)]
 pub struct JitEvm {
 	context: Option<evmjit::ContextHandle>,
+	ext: Box<evm::Ext>,
+}
+
+impl JitEvm {
+	pub fn new(ext: Box<evm::Ext>) -> Self {
+		JitEvm {
+			context: None,
+			ext: ext,
+		}
+	}
 }
 
 impl evm::Evm for JitEvm {
-	fn exec(&mut self, params: ActionParams, ext: &mut evm::Ext) -> evm::Result<GasLeft> {
+	fn exec(&mut self, params: ActionParams) -> evm::Result<U256> {
+		let ext = &mut self.ext;
 		// Dirty hack. This is unsafe, but we interact with ffi, so it's justified.
 		let ext_adapter: ExtAdapter<'static> = unsafe { ::std::mem::transmute(ExtAdapter::new(ext, params.address.clone())) };
 		let mut ext_handle = evmjit::ExtHandle::new(ext_adapter);
@@ -363,12 +373,12 @@ impl evm::Evm for JitEvm {
 		let res = context.exec();
 
 		match res {
-			evmjit::ReturnCode::Stop => Ok(GasLeft::Known(U256::from(context.gas_left()))),
+			evmjit::ReturnCode::Stop => Ok(U256::from(context.gas_left())),
 			evmjit::ReturnCode::Return =>
-				Ok(GasLeft::NeedsReturn(U256::from(context.gas_left()), context.output_data())),
+				ext.ret(&U256::from(context.gas_left()), context.output_data())
 			evmjit::ReturnCode::Suicide => {
 				ext.suicide(&Address::from_jit(&context.suicide_refund_address()));
-				Ok(GasLeft::Known(U256::from(context.gas_left())))
+				Ok(U256::from(context.gas_left()))
 			},
 			evmjit::ReturnCode::OutOfGas => Err(evm::Error::OutOfGas),
 			_err => Err(evm::Error::Internal)

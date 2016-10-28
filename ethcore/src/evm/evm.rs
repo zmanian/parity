@@ -83,35 +83,6 @@ impl fmt::Display for Error {
 /// A specialized version of Result over EVM errors.
 pub type Result<T> = ::std::result::Result<T, Error>;
 
-/// Gas Left: either it is a known value, or it needs to be computed by processing
-/// a return instruction.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum GasLeft<'a> {
-	/// Known gas left
-	Known(U256),
-	/// Return instruction must be processed.
-	NeedsReturn(U256, &'a [u8]),
-}
-
-/// Types that can be "finalized" using an EVM.
-///
-/// In practice, this is just used to define an inherent impl on
-/// `Reult<GasLeft<'a>>`.
-pub trait Finalize {
-	/// Consume the externalities, call return if necessary, and produce a final amount of gas left.
-	fn finalize<E: Ext>(self, ext: E) -> Result<U256>;
-}
-
-impl<'a> Finalize for Result<GasLeft<'a>> {
-	fn finalize<E: Ext>(self, ext: E) -> Result<U256> {
-		match self {
-			Ok(GasLeft::Known(gas)) => Ok(gas),
-			Ok(GasLeft::NeedsReturn(gas, ret_code)) => ext.ret(&gas, ret_code),
-			Err(err) => Err(err),
-		}
-	}
-}
-
 /// Cost calculation type. For low-gas usage we calculate costs using usize instead of U256
 pub trait CostType: Sized + From<usize> + Copy
 	+ ops::Mul<Output=Self> + ops::Div<Output=Self> + ops::Add<Output=Self> +ops::Sub<Output=Self>
@@ -205,12 +176,11 @@ impl CostType for usize {
 }
 
 /// Evm interface
-pub trait Evm {
+pub trait Evm<E: Ext> {
 	/// This function should be used to execute transaction.
 	///
-	/// It returns either an error, a known amount of gas left, or parameters to be used
-	/// to compute the final gas left.
-	fn exec(&mut self, params: ActionParams, ext: &mut Ext) -> Result<GasLeft>;
+	/// It returns either an error or a known amount of gas left.
+	fn exec(&mut self, params: ActionParams, ext: E) -> Result<U256>;
 }
 
 #[cfg(test)]

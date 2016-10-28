@@ -104,9 +104,9 @@ impl<Gas: CostType> Gasometer<Gas> {
 	/// We guarantee that the final element of the returned tuple (`provided`) will be `Some`
 	/// iff the `instruction` is one of `CREATE`, or any of the `CALL` variants. In this case,
 	/// it will be the amount of gas that the current context provides to the child context.
-	pub fn requirements(
+	pub fn requirements<Ext: evm::Ext>(
 		&mut self,
-		ext: &evm::Ext,
+		ext: &Ext,
 		instruction: Instruction,
 		info: &InstructionInfo,
 		stack: &Stack<U256>,
@@ -169,10 +169,18 @@ impl<Gas: CostType> Gasometer<Gas> {
 				Request::GasMem(gas, try!(mem_needed(stack.peek(0), stack.peek(1))))
 			},
 			instructions::CALLDATACOPY | instructions::CODECOPY => {
-				Request::GasMemCopy(default_gas, try!(mem_needed(stack.peek(0), stack.peek(2))), try!(Gas::from_u256(*stack.peek(2))))
+				Request::GasMemCopy(
+					default_gas,
+					try!(mem_needed(stack.peek(0), stack.peek(2))),
+					try!(Gas::from_u256(*stack.peek(2)))
+				)
 			},
 			instructions::EXTCODECOPY => {
-				Request::GasMemCopy(schedule.extcodecopy_base_gas.into(), try!(mem_needed(stack.peek(1), stack.peek(3))), try!(Gas::from_u256(*stack.peek(3))))
+				Request::GasMemCopy(
+					schedule.extcodecopy_base_gas.into(),
+					try!(mem_needed(stack.peek(1), stack.peek(3))),
+					try!(Gas::from_u256(*stack.peek(3)))
+				)
 			},
 			instructions::LOG0...instructions::LOG4 => {
 				let no_of_topics = instructions::get_log_topics(instruction);

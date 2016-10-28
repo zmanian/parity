@@ -32,7 +32,7 @@ use std::fmt;
 use std::str::FromStr;
 use docopt::Docopt;
 use util::{U256, FromHex, Uint, Bytes};
-use ethcore::evm::{self, Factory, VMType, Finalize};
+use ethcore::evm::{self, Factory, VMType};
 use ethcore::action_params::ActionParams;
 
 const USAGE: &'static str = r#"
@@ -73,10 +73,9 @@ pub fn run_vm(params: ActionParams) -> Result<Success, Failure> {
 	let initial_gas = params.gas;
 	let factory = Factory::new(VMType::Interpreter, 1024);
 	let mut vm = factory.create(params.gas);
-	let mut ext = ext::FakeExt::default();
 
 	let start = Instant::now();
-	let gas_left = vm.exec(params, &mut ext).finalize(ext);
+	let gas_left = vm.exec(params, ext::FakeExt::default());
 	let duration = start.elapsed();
 
 	match gas_left {
