@@ -858,11 +858,14 @@ macro_rules! construct_uint {
 			fn from(bytes: &[u8]) -> $name {
 				assert!($n_words * 8 >= bytes.len());
 
+				let len = bytes.len();
 				let mut ret = [0; $n_words];
-				for i in 0..bytes.len() {
-					let rev = bytes.len() - 1 - i;
-					let pos = rev / 8;
-					ret[pos] += (bytes[i] as u64) << ((rev % 8) * 8);
+				let mut rev = len;
+				for i in 0..len {
+					rev -= 1;
+					let pos = rev >> 3;
+					let rest = rev - (pos << 3);
+					ret[pos] += (bytes[i] as u64) << (rest << 3);
 				}
 				$name(ret)
 			}
