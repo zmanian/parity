@@ -27,7 +27,7 @@ use client::{
 	BlockChainClient, MiningBlockChainClient, BlockChainInfo, BlockStatus, BlockID,
 	TransactionID, UncleID, TraceId, TraceFilter, LastHashes, CallAnalytics, BlockImportError,
 };
-use db::{NUM_COLUMNS, COL_STATE};
+use db::{NUM_COLUMNS, COL_STATE, COL_META};
 use header::{Header as BlockHeader, BlockNumber};
 use filter::Filter;
 use log_entry::LocalizedLogEntry;
@@ -137,7 +137,7 @@ impl TestBlockChainClient {
 		client.genesis_hash = client.last_hash.read().clone();
 		client
 	}
-	
+
 	/// Set the transaction receipt result
 	pub fn set_transaction_receipt(&self, id: TransactionID, receipt: LocalizedReceipt) {
 		self.receipts.write().insert(id, receipt);
@@ -295,10 +295,15 @@ impl TestBlockChainClient {
 }
 
 pub fn get_temp_state_db() -> GuardedTempResult<StateDB> {
+	use state::MetaDB;
+
 	let temp = RandomTempPath::new();
 	let db = Database::open(&DatabaseConfig::with_columns(NUM_COLUMNS), temp.as_str()).unwrap();
-	let journal_db = journaldb::new(Arc::new(db), journaldb::Algorithm::EarlyMerge, COL_STATE);
-	let state_db = StateDB::new(journal_db, 1024 * 1024);
+	let db = Arc::new(db);
+	let journal_db = journaldb::new(db.clone(), journaldb::Algorithm::EarlyMerge, COL_STATE);
+	let meta_db = MetaDB::new(db, COL_META, &Default::default()).unwrap();
+
+	let state_db = StateDB::new(journal_db, meta_db, 1024 * 1024);
 	GuardedTempResult {
 		_temp: temp,
 		result: Some(state_db)

@@ -201,6 +201,8 @@ fn can_collect_garbage() {
 #[test]
 #[cfg_attr(feature="dev", allow(useless_vec))]
 fn can_generate_gas_price_statistics() {
+	::util::log::init_log();
+
 	let client_result = generate_dummy_client_with_data(16, 1, &vec_into![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
 	let client = client_result.reference();
 	let s = client.gas_price_statistics(8, 8).unwrap();
@@ -243,11 +245,13 @@ fn can_mine() {
 
 #[test]
 fn change_history_size() {
+	::util::log::init_log();
+
 	let dir = RandomTempPath::new();
 	let test_spec = Spec::new_null();
 	let mut config = ClientConfig::default();
 	let db_config = DatabaseConfig::with_columns(::db::NUM_COLUMNS);
-	config.history = 2;
+	config.history = 14;
 	let address = Address::random();
 	{
 		let client = Client::new(ClientConfig::default(), &test_spec, dir.as_path(), Arc::new(Miner::with_spec(&test_spec)), IoChannel::disconnected(), &db_config).unwrap();
@@ -259,6 +263,8 @@ fn change_history_size() {
 			client.import_sealed_block(b).unwrap(); // account change is in the journal overlay
 		}
 	}
+	info!("reconstructing");
+
 	let mut config = ClientConfig::default();
 	config.history = 10;
 	let client = Client::new(config, &test_spec, dir.as_path(), Arc::new(Miner::with_spec(&test_spec)), IoChannel::disconnected(), &db_config).unwrap();

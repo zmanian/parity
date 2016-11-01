@@ -158,6 +158,7 @@ impl Client {
 	) -> Result<Arc<Client>, ClientError> {
 		let path = path.to_path_buf();
 		let gb = spec.genesis_block();
+		let genesis_hash = spec.genesis_header().hash();
 
 		let db = Arc::new(try!(Database::open(&db_config, &path.to_str().expect("DB path could not be converted to string.")).map_err(ClientError::Database)));
 		let chain = Arc::new(BlockChain::new(config.blockchain.clone(), &gb, db.clone()));
@@ -169,10 +170,16 @@ impl Client {
 		};
 
 		let journal_db = journaldb::new(db.clone(), config.pruning, ::db::COL_STATE);
-		let mut state_db = StateDB::new(journal_db, config.state_cache_size);
+		let meta_db = try!(::state::MetaDB::new(db.clone(), ::db::COL_META, &genesis_hash).map_err(ClientError::Database));
+
+		let mut state_db = StateDB::new(journal_db, meta_db, config.state_cache_size);
 		if state_db.journal_db().is_empty() && try!(spec.ensure_db_good(&mut state_db)) {
 			let mut batch = DBTransaction::new(&db);
-			try!(state_db.journal_under(&mut batch, 0, &spec.genesis_header().hash()));
+			try!(state_db.journal_under(&mut batch, 0, &genesis_hash, *spec.genesis_header().parent_hash()));
+			try!(db.write(batch).map_err(ClientError::Database));
+
+			let mut batch = DBTransaction::new(&db);
+			try!(state_db.mark_canonical(&mut batch, 0, &genesis_hash));
 			try!(db.write(batch).map_err(ClientError::Database));
 		}
 
@@ -314,7 +321,7 @@ impl Client {
 		if let Some(parent) = chain_has_parent {
 			// Enact Verified Block
 			let last_hashes = self.build_last_hashes(header.parent_hash().clone());
-			let db = self.state_db.lock().boxed_clone_canon(header.parent_hash());
+			let db = self.state_db.lock().boxed_clone_canon(header.parent_hash(), header.number() - 1);
 
 			let enact_result = enact_verified(block, engine, self.tracedb.read().tracing_enabled(), db, &parent, last_hashes, self.factories.clone());
 			let locked_block = try!(enact_result.map_err(|e| {
@@ -474,7 +481,7 @@ impl Client {
 		// TODO: Prove it with a test.
 		let mut state = block.drain();
 
-		state.journal_under(&mut batch, number, hash).expect("DB commit failed");
+		state.journal_under(&mut batch, number, hash, parent).expect("DB commit failed");
 
 		if number >= self.history {
 			let n = number - self.history;
@@ -573,7 +580,7 @@ impl Client {
 		let header = self.best_block_header();
 		let header = HeaderView::new(&header);
 		State::from_existing(
-			self.state_db.lock().boxed_clone_canon(&header.hash()),
+			self.state_db.lock().boxed_clone_canon(&header.hash(), header.number()),
 			header.state_root(),
 			self.engine.account_start_nonce(),
 			self.factories.clone())
@@ -739,8 +746,12 @@ impl snapshot::DatabaseRestore for Client {
 		try!(db.restore(new_db));
 
 		let cache_size = state_db.cache_size();
-		*state_db = StateDB::new(journaldb::new(db.clone(), self.pruning, ::db::COL_STATE), cache_size);
 		*chain = Arc::new(BlockChain::new(self.config.blockchain.clone(), &[], db.clone()));
+
+		let journal_db = journaldb::new(db.clone(), self.pruning, ::db::COL_STATE);
+		let meta_db = try!(::state::MetaDB::new(db.clone(), ::db::COL_STATE, &chain.genesis_hash())
+			.map_err(ClientError::Database));
+		*state_db = StateDB::new(journal_db, meta_db, cache_size);
 		*tracedb = TraceDB::new(self.config.tracing.clone(), db.clone(), chain.clone());
 		Ok(())
 	}
@@ -1145,12 +1156,13 @@ impl MiningBlockChainClient for Client {
 		let engine = &*self.engine;
 		let chain = self.chain.read();
 		let h = chain.best_block_hash();
+		let num = chain.best_block_number();
 
 		let mut open_block = OpenBlock::new(
 			engine,
 			self.factories.clone(),
 			false,	// TODO: this will need to be parameterised once we want to do immediate mining insertion.
-			self.state_db.lock().boxed_clone_canon(&h),
+			self.state_db.lock().boxed_clone_canon(&h, num),
 			&chain.block_header(&h).expect("h is best block hash: so its header must exist: qed"),
 			self.build_last_hashes(h.clone()),
 			author,

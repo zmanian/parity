@@ -15,7 +15,7 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 use util::*;
-use state::Account;
+use state::{Account, AccountMeta};
 use account_db::AccountDBMut;
 use ethjson;
 use types::account_diff::*;
@@ -61,6 +61,17 @@ impl PodAccount {
 		stream.append(&sec_trie_root(self.storage.iter().map(|(k, v)| (k.to_vec(), rlp::encode(&U256::from(&**v)).to_vec())).collect()));
 		stream.append(&self.code.as_ref().unwrap_or(&vec![]).sha3());
 		stream.out()
+	}
+
+	/// Returns the account meta for this account.
+	pub fn to_meta(&self) -> AccountMeta {
+		AccountMeta {
+			code_size: self.code.as_ref().map(|c| c.len()).unwrap_or(0),
+			nonce: self.nonce,
+			balance: self.balance,
+			storage_root: sec_trie_root(self.storage.iter().map(|(k, v)| (k.to_vec(), rlp::encode(&U256::from(&**v)).to_vec())).collect()),
+			code_hash: self.code.as_ref().unwrap_or(&vec![]).sha3(),
+		}
 	}
 
 	/// Place additional data into given hash DB.

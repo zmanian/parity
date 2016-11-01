@@ -19,7 +19,7 @@ use lru_cache::LruCache;
 use util::journaldb::JournalDB;
 use util::hash::{H256};
 use util::hashdb::HashDB;
-use state::{Account, MetaDB};
+use state::{Account, AccountMeta, MetaDB};
 use header::BlockNumber;
 use util::{Arc, Address, Database, DBTransaction, UtilError, Mutex, Hashable};
 use bloom_journal::{Bloom, BloomJournal};
@@ -87,6 +87,8 @@ struct BlockChanges {
 pub struct StateDB {
 	/// Backing database.
 	db: Box<JournalDB>,
+	/// On-disk account cache.
+	meta_db: MetaDB,
 	/// Shared canonical state cache.
 	account_cache: Arc<Mutex<AccountCache>>,
 	/// Local dirty cache.
@@ -97,6 +99,8 @@ pub struct StateDB {
 	/// Hash of the block on top of which this instance was created or
 	/// `None` if cache is disabled
 	parent_hash: Option<H256>,
+	/// Number of the block on top of which this instance was created.
+	parent_number: Option<BlockNumber>,
 	/// Hash of the committing block or `None` if not committed yet.
 	commit_hash: Option<H256>,
 	/// Number of the committing block or `None` if not committed yet.
@@ -104,16 +108,17 @@ pub struct StateDB {
 }
 
 impl StateDB {
-	/// Create a new instance wrapping `JournalDB` and the maximum allowed size
+	/// Create a new instance wrapping `JournalDB` and `MetaDB` and the maximum allowed size
 	/// of the LRU cache in bytes. Actual used memory may (read: will) be higher due to bookkeeping.
 	// TODO: make the cache size actually accurate by moving the account storage cache
 	// into the `AccountCache` structure as its own `LruCache<(Address, H256), H256>`.
-	pub fn new(db: Box<JournalDB>, cache_size: usize) -> StateDB {
+	pub fn new(db: Box<JournalDB>, meta_db: MetaDB, cache_size: usize) -> StateDB {
 		let bloom = Self::load_bloom(db.backing());
 		let cache_items = cache_size / ::std::mem::size_of::<Option<Account>>();
 
 		StateDB {
 			db: db,
+			meta_db: meta_db,
 			account_cache: Arc::new(Mutex::new(AccountCache {
 				accounts: LruCache::new(cache_items),
 				modifications: VecDeque::new(),
@@ -122,6 +127,7 @@ impl StateDB {
 			account_bloom: Arc::new(Mutex::new(bloom)),
 			cache_size: cache_size,
 			parent_hash: None,
+			parent_number: None,
 			commit_hash: None,
 			commit_number: None,
 		}
@@ -182,12 +188,14 @@ impl StateDB {
 	}
 
 	/// Journal all recent operations under the given era and ID.
-	pub fn journal_under(&mut self, batch: &mut DBTransaction, now: u64, id: &H256) -> Result<u32, UtilError> {
+	pub fn journal_under(&mut self, batch: &mut DBTransaction, now: u64, id: &H256, parent_id: H256) -> Result<u32, UtilError> {
 		{
  			let mut bloom_lock = self.account_bloom.lock();
  			try!(Self::commit_bloom(batch, bloom_lock.drain_journal()));
  		}
 		let records = try!(self.db.journal_under(batch, now, id));
+		self.meta_db.journal_under(batch, now, *id, parent_id);
+
 		self.commit_hash = Some(id.clone());
 		self.commit_number = Some(now);
 		Ok(records)
@@ -196,6 +204,7 @@ impl StateDB {
 	/// Mark a given candidate from an ancient era as canonical, enacting its removals from the
 	/// backing database and reverting any non-canonical historical commit's insertions.
 	pub fn mark_canonical(&mut self, batch: &mut DBTransaction, end_era: u64, canon_id: &H256) -> Result<u32, UtilError> {
+		self.meta_db.mark_canonical(batch, end_era, *canon_id);
 		self.db.mark_canonical(batch, end_era, canon_id)
 	}
 
@@ -305,29 +314,58 @@ impl StateDB {
 		self.db.as_hashdb_mut()
 	}
 
+	/// Query the meta db about a given account at the canonical parent block.
+	/// Returns `None` if there is no canonical parent block.
+	pub fn get_from_meta(&self, addr: &Address) -> Option<Option<AccountMeta>> {
+		if let (Some(p_hash), Some(p_num)) = (self.parent_hash, self.parent_number) {
+			match self.meta_db.get(addr, (p_num, p_hash)) {
+				Ok(meta) => Some(meta),
+				Err(e) => {
+					panic!("Encountered error {:?} while querying meta_db.", e);
+				}
+			}
+		} else {
+			None
+		}
+	}
+
+	/// Set the meta data for a given account.
+	pub fn set_meta(&mut self, addr: Address, meta: AccountMeta) {
+		self.meta_db.set(addr, meta);
+	}
+
+	/// Remove the meta data for a given account.
+	pub fn remove_meta(&mut self, addr: Address) {
+		self.meta_db.remove(addr);
+	}
+
 	/// Clone the database.
 	pub fn boxed_clone(&self) -> StateDB {
 		StateDB {
 			db: self.db.boxed_clone(),
+			meta_db: self.meta_db.clone(),
 			account_cache: self.account_cache.clone(),
 			local_cache: Vec::new(),
 			account_bloom: self.account_bloom.clone(),
 			cache_size: self.cache_size,
 			parent_hash: None,
+			parent_number: None,
 			commit_hash: None,
 			commit_number: None,
 		}
 	}
 
 	/// Clone the database for a canonical state.
-	pub fn boxed_clone_canon(&self, parent: &H256) -> StateDB {
+	pub fn boxed_clone_canon(&self, parent_hash: &H256, parent_number: u64) -> StateDB {
 		StateDB {
 			db: self.db.boxed_clone(),
+			meta_db: self.meta_db.clone(),
 			account_cache: self.account_cache.clone(),
 			local_cache: Vec::new(),
 			account_bloom: self.account_bloom.clone(),
 			cache_size: self.cache_size,
-			parent_hash: Some(parent.clone()),
+			parent_hash: Some(parent_hash.clone()),
+			parent_number: Some(parent_number),
 			commit_hash: None,
 			commit_number: None,
 		}
@@ -365,10 +403,15 @@ impl StateDB {
 	/// Returns 'None' if cache is disabled or if the account is not cached.
 	pub fn get_cached_account(&self, addr: &Address) -> Option<Option<Account>> {
 		let mut cache = self.account_cache.lock();
+
 		if !Self::is_allowed(addr, &self.parent_hash, &cache.modifications) {
 			return None;
 		}
-		cache.accounts.get_mut(addr).map(|a| a.as_ref().map(|a| a.clone_basic()))
+
+		match cache.accounts.get_mut(addr).map(|a| a.as_ref().map(|a| a.clone_basic())) {
+			Some(acc) => Some(acc),
+			None => self.get_from_meta(addr).map(|c| c.map(Account::from_meta)),
+		}
 	}
 
 	/// Get value from a cached account.
@@ -376,10 +419,14 @@ impl StateDB {
 	pub fn get_cached<F, U>(&self, a: &Address, f: F) -> Option<U>
 		where F: FnOnce(Option<&mut Account>) -> U {
 		let mut cache = self.account_cache.lock();
+
 		if !Self::is_allowed(a, &self.parent_hash, &cache.modifications) {
 			return None;
 		}
-		cache.accounts.get_mut(a).map(|c| f(c.as_mut()))
+		match cache.accounts.get_mut(a) {
+			Some(c) => Some(f(c.as_mut())),
+			None => self.get_from_meta(a).map(|c| f(c.map(Account::from_meta).as_mut())),
+		}
 	}
 
 	/// Query how much memory is set aside for the accounts cache (in bytes).
@@ -425,7 +472,7 @@ impl StateDB {
 #[cfg(test)]
 mod tests {
 
-	use util::{U256, H256, FixedHash, Address, DBTransaction};
+	use util::{U256, H256, FixedHash, Address};
 	use tests::helpers::*;
 	use state::Account;
 	use util::log::init_log;
@@ -436,7 +483,8 @@ mod tests {
 
 		let mut state_db_result = get_temp_state_db();
 		let state_db = state_db_result.take();
-		let root_parent = H256::random();
+		let backing = state_db.journal_db().backing();
+		let root_parent = H256::zero();
 		let address = Address::random();
 		let h0 = H256::random();
 		let h1a = H256::random();
@@ -445,56 +493,57 @@ mod tests {
 		let h2b = H256::random();
 		let h3a = H256::random();
 		let h3b = H256::random();
-		let mut batch = DBTransaction::new(state_db.journal_db().backing());
+		let mut batch = backing.transaction();
 
 		// blocks  [ 3a(c) 2a(c) 2b 1b 1a(c) 0 ]
 	    // balance [ 5     5     4  3  2     2 ]
-		let mut s = state_db.boxed_clone_canon(&root_parent);
+		let mut s = state_db.boxed_clone();
+		s.parent_hash = Some(root_parent);
 		s.add_to_account_cache(address, Some(Account::new_basic(2.into(), 0.into())), false);
-		s.journal_under(&mut batch, 0, &h0).unwrap();
+		s.journal_under(&mut batch, 0, &h0, root_parent).unwrap();
 		s.sync_cache(&[], &[], true);
 
-		let mut s = state_db.boxed_clone_canon(&h0);
-		s.journal_under(&mut batch, 1, &h1a).unwrap();
+		let mut s = state_db.boxed_clone_canon(&h0, 0);
+		s.journal_under(&mut batch, 1, &h1a, h0).unwrap();
 		s.sync_cache(&[], &[], true);
 
-		let mut s = state_db.boxed_clone_canon(&h0);
+		let mut s = state_db.boxed_clone_canon(&h0, 0);
 		s.add_to_account_cache(address, Some(Account::new_basic(3.into(), 0.into())), true);
-		s.journal_under(&mut batch, 1, &h1b).unwrap();
+		s.journal_under(&mut batch, 1, &h1b, h0).unwrap();
 		s.sync_cache(&[], &[], false);
 
-		let mut s = state_db.boxed_clone_canon(&h1b);
+		let mut s = state_db.boxed_clone_canon(&h1b, 1);
 		s.add_to_account_cache(address, Some(Account::new_basic(4.into(), 0.into())), true);
-		s.journal_under(&mut batch, 2, &h2b).unwrap();
+		s.journal_under(&mut batch, 2, &h2b, h1b).unwrap();
 		s.sync_cache(&[], &[], false);
 
-		let mut s = state_db.boxed_clone_canon(&h1a);
+		let mut s = state_db.boxed_clone_canon(&h1a, 1);
 		s.add_to_account_cache(address, Some(Account::new_basic(5.into(), 0.into())), true);
-		s.journal_under(&mut batch, 2, &h2a).unwrap();
+		s.journal_under(&mut batch, 2, &h2a, h1a).unwrap();
 		s.sync_cache(&[], &[], true);
 
-		let mut s = state_db.boxed_clone_canon(&h2a);
-		s.journal_under(&mut batch, 3, &h3a).unwrap();
+		let mut s = state_db.boxed_clone_canon(&h2a, 2);
+		s.journal_under(&mut batch, 3, &h3a, h2a).unwrap();
 		s.sync_cache(&[], &[], true);
 
-		let s = state_db.boxed_clone_canon(&h3a);
+		let s = state_db.boxed_clone_canon(&h3a, 3);
 		assert_eq!(s.get_cached_account(&address).unwrap().unwrap().balance(), &U256::from(5));
 
-		let s = state_db.boxed_clone_canon(&h1a);
+		let s = state_db.boxed_clone_canon(&h1a, 1);
 		assert!(s.get_cached_account(&address).is_none());
 
-		let s = state_db.boxed_clone_canon(&h2b);
+		let s = state_db.boxed_clone_canon(&h2b, 2);
 		assert!(s.get_cached_account(&address).is_none());
 
-		let s = state_db.boxed_clone_canon(&h1b);
+		let s = state_db.boxed_clone_canon(&h1b, 1);
 		assert!(s.get_cached_account(&address).is_none());
 
 		// reorg to 3b
 		// blocks  [ 3b(c) 3a 2a 2b(c) 1b 1a 0 ]
-		let mut s = state_db.boxed_clone_canon(&h2b);
-		s.journal_under(&mut batch, 3, &h3b).unwrap();
+		let mut s = state_db.boxed_clone_canon(&h2b, 2);
+		s.journal_under(&mut batch, 3, &h3b, h2b).unwrap();
 		s.sync_cache(&[h1b.clone(), h2b.clone(), h3b.clone()], &[h1a.clone(), h2a.clone(), h3a.clone()], true);
-		let s = state_db.boxed_clone_canon(&h3a);
+		let s = state_db.boxed_clone_canon(&h3a, 3);
 		assert!(s.get_cached_account(&address).is_none());
 	}
 }

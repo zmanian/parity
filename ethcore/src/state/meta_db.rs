@@ -17,9 +17,11 @@
 //! Account meta-database.
 //!
 //! This is a journalled database which stores information on accounts.
-//! The instance of `MetaDB` can be pointed towards a specific branch in its journal.
-//! Queries for account data will only succeed if they are present in that branch or
-//! the backing database.
+//! It is implemented using a configurable journal (following a similar API to JournalDB)
+//! which builds off of an on-disk flat representation of the state for the last committed block.
+//!
+//! Any query about an account can be definitively answered for any block in the journal
+//! or the canonical base.
 //!
 //! The journal format is two-part. First, for every era we store a list of
 //! candidate hashes.
@@ -30,7 +32,7 @@ use util::{Address, H256, U256, RwLock};
 use util::kvdb::{Database, DBTransaction};
 use rlp::{Decoder, DecoderError, RlpDecodable, RlpEncodable, RlpStream, Stream, Rlp, View};
 
-use std::collections::{BTreeMap, HashMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, BTreeSet};
 use std::sync::Arc;
 
 const PADDING: [u8; 10] = [0; 10];
@@ -175,6 +177,8 @@ impl Journal {
 	// read the journal from the database, starting from the last committed
 	// era.
 	fn read_from(db: &Database, col: Option<u32>, base: (u64, H256)) -> Result<Self, String> {
+		trace!(target: "meta_db", "loading journal");
+
 		let mut journal = Journal {
 			entries: BTreeMap::new(),
 			modifications: HashMap::new(),
@@ -223,7 +227,8 @@ impl Journal {
 /// queries along the current branch.
 ///
 /// This has a short journal period, and is only really usable while syncing.
-/// When replaying old transactions, it can't be used safely.
+/// When replaying old transactions, it can't be used reliably.
+#[derive(Clone)]
 pub struct MetaDB {
 	col: Option<u32>,
 	db: Arc<Database>,
@@ -268,6 +273,9 @@ impl MetaDB {
 		}
 
 		let encoded = ::rlp::encode(&j_entry);
+
+		trace!(target: "meta_db", "produced entry: {:?}", &*encoded);
+
 		batch.put(self.col, &id_key(&id), &encoded);
 
 		journal.entries.insert((now, id), j_entry);
@@ -307,6 +315,8 @@ impl MetaDB {
 				}
 			}
 		}
+
+		journal.canon_base = (end_era, canon_id);
 
 		// update meta keys in the database.
 		let mut base_stream = RlpStream::new_list(2);
@@ -377,11 +387,13 @@ impl MetaDB {
 	/// This will overwrite any previous changes to the overlay,
 	/// and will be queried prior to the journal.
 	pub fn set(&mut self, address: Address, meta: AccountMeta) {
+		trace!(target: "meta_db", "set({:?}, {:?})", address, meta);
 		self.overlay.insert(address, Some(meta));
 	}
 
 	/// Destroy the account details here.
 	pub fn remove(&mut self, address: Address) {
+		trace!(target: "meta_db", "remove({:?})", address);
 		self.overlay.insert(address, None);
 	}
 }
@@ -410,6 +422,10 @@ mod tests {
 			meta_db.journal_under(&mut batch, i + 1, this.into(), parent.into());
 			db.write(batch).unwrap();
 		}
+
+		let mut batch = db.transaction();
+		meta_db.mark_canonical(&mut batch, 1, U256::from(1).into());
+		db.write(batch).unwrap();
 
 		let journal = meta_db.journal;
 		let meta_db = MetaDB::new(db.clone(), None, &Default::default()).unwrap();

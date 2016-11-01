@@ -21,6 +21,8 @@ use pod_account::*;
 use rlp::*;
 use lru_cache::LruCache;
 
+use state::AccountMeta;
+
 use std::cell::{RefCell, Cell};
 
 const STORAGE_CACHE_ITEMS: usize = 8192;
@@ -136,6 +138,22 @@ impl Account {
 			code_hash: SHA3_EMPTY,
 			code_cache: Arc::new(vec![]),
 			code_size: None,
+			code_filth: Filth::Clean,
+			address_hash: Cell::new(None),
+		}
+	}
+
+	/// Load an account's details from meta info.
+	pub fn from_meta(meta: AccountMeta) -> Account {
+		Account {
+			balance: meta.balance,
+			nonce: meta.nonce,
+			storage_root: meta.storage_root,
+			storage_cache: Self::empty_storage_cache(),
+			storage_changes: HashMap::new(),
+			code_hash: meta.code_hash,
+			code_cache: Arc::new(vec![]),
+			code_size: Some(meta.code_size),
 			code_filth: Filth::Clean,
 			address_hash: Cell::new(None),
 		}
@@ -356,6 +374,33 @@ impl Account {
 				self.code_filth = Filth::Clean;
 			},
 			(false, _) => {},
+		}
+	}
+
+	/// Commit meta information. Must be done after the account is fully committed.
+	pub fn account_meta(&self, prev: Option<AccountMeta>) -> AccountMeta {
+		match prev {
+			Some(mut prev) => {
+				if let Some(size) = self.code_size {
+					prev.code_size = size;
+				}
+
+				prev.code_hash = self.code_hash;
+				prev.storage_root = self.storage_root;
+				prev.balance = self.balance;
+				prev.nonce = self.nonce;
+
+				prev
+			}
+			None => {
+				AccountMeta {
+					code_size: self.code_size.unwrap_or(0),
+					code_hash: self.code_hash,
+					storage_root: self.storage_root,
+					balance: self.balance,
+					nonce: self.nonce,
+				}
+			}
 		}
 	}
 

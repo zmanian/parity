@@ -35,7 +35,7 @@ mod meta_db;
 mod substate;
 
 pub use self::account::Account;
-pub use self::meta_db::MetaDB;
+pub use self::meta_db::{AccountMeta, MetaDB};
 pub use self::substate::Substate;
 
 /// Used to return information about an `State::apply` operation.
@@ -513,9 +513,18 @@ impl State {
 					db.note_account_bloom(address);
 				}
 				let addr_hash = account.address_hash(address);
-				let mut account_db = factories.accountdb.create(db.as_hashdb_mut(), addr_hash);
-				account.commit_storage(&factories.trie, account_db.as_hashdb_mut());
-				account.commit_code(account_db.as_hashdb_mut());
+
+				{
+					let mut account_db = factories.accountdb.create(db.as_hashdb_mut(), addr_hash);
+					account.commit_storage(&factories.trie, account_db.as_hashdb_mut());
+					account.commit_code(account_db.as_hashdb_mut());
+				}
+
+				if let Some(prev) = db.get_from_meta(&address) {
+					db.set_meta(*address, account.account_meta(prev));
+				}
+			} else {
+				db.remove_meta(*address);
 			}
 		}
 

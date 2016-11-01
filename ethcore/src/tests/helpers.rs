@@ -156,7 +156,21 @@ pub fn generate_dummy_client_with_spec_and_data<F>(get_test_spec: F, block_numbe
 	let mut db_result = get_temp_state_db();
 	let mut db = db_result.take();
 	test_spec.ensure_db_good(&mut db).unwrap();
+
+
 	let genesis_header = test_spec.genesis_header();
+
+	{
+		let backing = db.journal_db().backing().clone();
+
+		let mut batch = backing.transaction();
+		db.journal_under(&mut batch, 0, &genesis_header.hash(), *genesis_header.parent_hash()).unwrap();
+		backing.write_buffered(batch);
+
+		let mut batch = backing.transaction();
+		db.mark_canonical(&mut batch, 0, &genesis_header.hash()).unwrap();
+		backing.write_buffered(batch);
+	}
 
 	let mut rolling_timestamp = 40;
 	let mut last_hashes = vec![];
@@ -208,7 +222,8 @@ pub fn generate_dummy_client_with_spec_and_data<F>(get_test_spec: F, block_numbe
 		db = b.drain();
 	}
 	client.flush_queue();
-	client.import_verified_blocks();
+
+	assert_eq!(client.chain_info().best_block_number, block_number as u64);
 
 	GuardedTempResult::<Arc<Client>> {
 		_temp: dir,
@@ -351,7 +366,9 @@ pub fn get_temp_state() -> GuardedTempResult<State> {
 pub fn get_temp_state_db_in(path: &Path) -> StateDB {
 	let db = new_db(path.to_str().expect("Only valid utf8 paths for tests."));
 	let journal_db = journaldb::new(db.clone(), journaldb::Algorithm::EarlyMerge, ::db::COL_STATE);
-	StateDB::new(journal_db, 5 * 1024 * 1024)
+	let meta_db = ::state::MetaDB::new(db.clone(), ::db::COL_META, &Default::default()).unwrap();
+
+	StateDB::new(journal_db, meta_db, 5 * 1024 * 1024)
 }
 
 pub fn get_temp_state_in(path: &Path) -> State {
