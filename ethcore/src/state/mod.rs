@@ -31,9 +31,11 @@ use transaction::SignedTransaction;
 use state_db::StateDB;
 
 mod account;
+mod meta_db;
 mod substate;
 
 pub use self::account::Account;
+pub use self::meta_db::MetaDB;
 pub use self::substate::Substate;
 
 /// Used to return information about an `State::apply` operation.

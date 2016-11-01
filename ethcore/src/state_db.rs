@@ -19,7 +19,7 @@ use lru_cache::LruCache;
 use util::journaldb::JournalDB;
 use util::hash::{H256};
 use util::hashdb::HashDB;
-use state::Account;
+use state::{Account, MetaDB};
 use header::BlockNumber;
 use util::{Arc, Address, Database, DBTransaction, UtilError, Mutex, Hashable};
 use bloom_journal::{Bloom, BloomJournal};
@@ -104,7 +104,6 @@ pub struct StateDB {
 }
 
 impl StateDB {
-
 	/// Create a new instance wrapping `JournalDB` and the maximum allowed size
 	/// of the LRU cache in bytes. Actual used memory may (read: will) be higher due to bookkeeping.
 	// TODO: make the cache size actually accurate by moving the account storage cache

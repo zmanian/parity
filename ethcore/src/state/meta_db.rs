@@ -26,11 +26,11 @@
 //!
 //! For each hash, we store a list of changes in that candidate.
 
-use util::{Address, H256, U256};
+use util::{Address, H256, U256, RwLock};
 use util::kvdb::{Database, DBTransaction};
 use rlp::{Decoder, DecoderError, RlpDecodable, RlpEncodable, RlpStream, Stream, Rlp, View};
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 const PADDING: [u8; 10] = [0; 10];
@@ -49,50 +49,15 @@ fn id_key(id: &H256) -> Vec<u8> {
 	stream.out()
 }
 
-// deltas in the journal -- these don't contain data for simple rollbacks.
-#[derive(Debug, PartialEq)]
-enum JournalDelta {
-	Destroy,
-	Set(AccountMeta),
-}
-
-impl RlpEncodable for JournalDelta {
-	fn rlp_append(&self, s: &mut RlpStream) {
-		s.begin_list(2);
-		match *self {
-			JournalDelta::Destroy => s.append(&false).append_empty_data(),
-			JournalDelta::Set(ref meta) => s.append(&true).append(meta),
-		};
-	}
-}
-
-impl RlpDecodable for JournalDelta {
-	fn decode<D>(decoder: &D) -> Result<Self, DecoderError> where D: Decoder {
-		let rlp = decoder.as_rlp();
-
-		Ok(match try!(rlp.val_at::<bool>(0)) {
-			true => JournalDelta::Set(try!(rlp.val_at(1))),
-			false => JournalDelta::Destroy,
-		})
-	}
-}
-
-// deltas in the branch view -- these contain data making it simple to
-// roll back.
-#[derive(Debug, PartialEq)]
-enum BranchDelta {
-	Destroy(AccountMeta),
-	Init(AccountMeta),
-	Replace(AccountMeta, AccountMeta),
-}
-
-impl<'a> From<&'a BranchDelta> for JournalDelta {
-	fn from(bd: &'a BranchDelta) -> Self {
-		match *bd {
-			BranchDelta::Destroy(_) => JournalDelta::Destroy,
-			BranchDelta::Init(ref new) | BranchDelta::Replace(ref new, _) => JournalDelta::Set(new.clone()),
-		}
-	}
+/// Errors which can occur in the operation of the meta db.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+	/// A database error.
+	Database(String),
+	/// No journal entry found for the specified era, id.
+	MissingJournalEntry(u64, H256),
+	/// Request made for pruned state.
+	StatePruned(u64, H256),
 }
 
 /// Account meta-information.
@@ -135,56 +100,123 @@ impl RlpDecodable for AccountMeta {
 	}
 }
 
-// The journal used to store meta info.
-#[derive(Debug, PartialEq)]
-struct Journal {
-	// maps block numbers (or more abstractly, eras) to potential canonical meta info.
-	entries: BTreeMap<u64, HashMap<H256, JournalEntry>>,
-}
-
-impl Journal {
-	// read the journal from the database, starting from the last committed
-	// era.
-	fn read_from(db: &Database, col: Option<u32>, era: u64) -> Result<Self, String> {
-		let mut journal = Journal {
-			entries: BTreeMap::new(),
-		};
-
-		let mut era = era + 1;
-		while let Some(hashes) = try!(db.get(col, &journal_key(&era))).map(|x| ::rlp::decode::<Vec<H256>>(&x)) {
-			let candidates: Result<HashMap<_, _>, String> = hashes.into_iter().map(|hash| {
-				let journal_rlp = try!(db.get(col, &id_key(&hash)))
-					.expect(&format!("corrupted database: missing journal data for {}.", hash));
-
-				let rlp = Rlp::new(&journal_rlp);
-
-				Ok((hash, JournalEntry {
-					parent: rlp.val_at(0),
-					entries: rlp.at(1).iter().map(|e| (e.val_at(0), e.val_at(1))).collect(),
-				}))
-			}).collect();
-			let candidates = try!(candidates);
-
-			trace!(target: "meta_db", "journal: loaded {} candidates for era {}", candidates.len(), era);
-			journal.entries.insert(era, candidates);
-			era += 1;
-		}
-
-		Ok(journal)
-	}
-}
-
 // Each journal entry stores the parent hash of the block it corresponds to
 // and the changes in the meta state it lead to.
 #[derive(Debug, PartialEq)]
 struct JournalEntry {
 	parent: H256,
-	entries: Vec<(Address, JournalDelta)>,
+	// every entry which was set for this era.
+	entries: HashMap<Address, Option<AccountMeta>>,
 }
 
-/// Reorganization is impossible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReorgImpossible;
+impl RlpEncodable for JournalEntry {
+	fn rlp_append(&self, s: &mut RlpStream) {
+		s.begin_list(2);
+		s.append(&self.parent);
+
+		s.begin_list(self.entries.len());
+		for (addr, delta) in self.entries.iter() {
+			s.begin_list(2).append(addr);
+			s.begin_list(2);
+
+			match *delta {
+				Some(ref new) => {
+					s.append(&true).append(new);
+				}
+				None => {
+					s.append(&false).append_empty_data();
+				}
+			}
+		}
+	}
+}
+
+impl RlpDecodable for JournalEntry {
+	fn decode<D>(decoder: &D) -> Result<Self, DecoderError> where D: Decoder {
+		let rlp = decoder.as_rlp();
+		let mut entries = HashMap::new();
+
+		for entry in try!(rlp.at(1)).iter() {
+			let addr = try!(entry.val_at(0));
+			let maybe = try!(entry.at(1));
+
+			let delta = match try!(maybe.val_at(0)) {
+				true => Some(try!(maybe.val_at(1))),
+				false => None,
+			};
+
+			entries.insert(addr, delta);
+		}
+
+		Ok(JournalEntry {
+			parent: try!(rlp.val_at(0)),
+			entries: entries,
+		})
+	}
+}
+
+// The journal used to store meta info.
+// Invariants which must be preserved:
+//   - The parent entry of any given journal entry must also be present
+//     in the journal, unless it's the canonical base being built off of.
+//   - No cyclic entries. There should never be a path from any given entry to
+//     itself other than the empty path.
+//   - Modifications may only point to entries in the journal.
+#[derive(Debug, PartialEq)]
+struct Journal {
+	// maps era, id pairs to potential canonical meta info.
+	entries: BTreeMap<(u64, H256), JournalEntry>,
+	// maps addresses to sets of blocks they were modified at.
+	modifications: HashMap<Address, BTreeSet<(u64, H256)>>,
+	canon_base: (u64, H256), // the base which the journal builds off of.
+}
+
+impl Journal {
+	// read the journal from the database, starting from the last committed
+	// era.
+	fn read_from(db: &Database, col: Option<u32>, base: (u64, H256)) -> Result<Self, String> {
+		let mut journal = Journal {
+			entries: BTreeMap::new(),
+			modifications: HashMap::new(),
+			canon_base: base,
+		};
+
+		let mut era = base.0 + 1;
+		while let Some(hashes) = try!(db.get(col, &journal_key(&era))).map(|x| ::rlp::decode::<Vec<H256>>(&x)) {
+			let candidates: Result<HashMap<_, _>, String> = hashes.into_iter().map(|hash| {
+				let journal_rlp = try!(db.get(col, &id_key(&hash)))
+					.expect(&format!("corrupted database: missing journal data for {}.", hash));
+
+				let entry: JournalEntry = ::rlp::decode(&journal_rlp);
+
+				for addr in entry.entries.keys() {
+					journal.modifications.entry(*addr).or_insert_with(BTreeSet::new).insert((era, hash));
+				}
+
+				Ok(((era, hash), entry))
+			}).collect();
+			let candidates = try!(candidates);
+
+			trace!(target: "meta_db", "journal: loaded {} candidates for era {}", candidates.len(), era);
+			journal.entries.extend(candidates);
+			era += 1;
+		}
+
+		Ok(journal)
+	}
+
+	// write journal era.
+	fn write_era(&self, col: Option<u32>, batch: &mut DBTransaction, era: u64) {
+		let key = journal_key(&era);
+		let candidate_hashes: Vec<_> = self.entries.keys()
+			.skip_while(|&&(ref e, _)| e < &era)
+			.take_while(|&&(e, _)| e == era)
+			.map(|&(_, ref h)| h.clone())
+			.collect();
+
+		batch.put(col, &key, &*::rlp::encode(&candidate_hashes));
+	}
+}
 
 /// The account meta-database. See the module docs for more details.
 /// It can't be queried without a `MetaBranch` which allows for accurate
@@ -195,9 +227,8 @@ pub struct ReorgImpossible;
 pub struct MetaDB {
 	col: Option<u32>,
 	db: Arc<Database>,
-	journal: Journal,
-	last_committed: (H256, u64), // last committed era.
-	branch: MetaBranch, // current branch.
+	journal: Arc<RwLock<Journal>>,
+	overlay: HashMap<Address, Option<AccountMeta>>,
 }
 
 impl MetaDB {
@@ -206,424 +237,152 @@ impl MetaDB {
 	/// After creation, check the last committed era to see if the genesis state
 	/// is in. If not, it should be inserted, journalled, and marked canonical.
 	pub fn new(db: Arc<Database>, col: Option<u32>, genesis_hash: &H256) -> Result<Self, String> {
-		let last_committed: (H256, u64) = try!(db.get(col, b"latest")).map(|raw| {
+		let base: (u64, H256) = try!(db.get(col, b"base")).map(|raw| {
 			let rlp = Rlp::new(&raw);
 
 			(rlp.val_at(0), rlp.val_at(1))
-		}).unwrap_or_else(|| (genesis_hash.clone(), 0));
+		}).unwrap_or_else(|| (0, genesis_hash.clone()));
 
-		let journal = try!(Journal::read_from(&*db, col, last_committed.1));
+		let journal = try!(Journal::read_from(&*db, col, base));
 
 		Ok(MetaDB {
 			col: col,
 			db: db,
-			journal: journal,
-			last_committed: last_committed.clone(),
-			branch: MetaBranch {
-				ancestors: VecDeque::new(),
-				current_changes: Vec::new(),
-				overlay: HashMap::new(),
-				recent: HashMap::new(),
-			}
+			journal: Arc::new(RwLock::new(journal)),
+			overlay: HashMap::new(),
 		})
 	}
 
-	/// Journal all pending changes under the given era and id. Also updates
-	/// the branch view to point at this era.
+	/// Journal all pending changes under the given era and id.
 	pub fn journal_under(&mut self, batch: &mut DBTransaction, now: u64, id: H256, parent_id: H256) {
 		trace!(target: "meta_db", "journalling ({}, {})", now, id);
+		let mut journal = self.journal.write();
 
-		// convert meta branch pending changes to journal entry.
-		let pending: Vec<(Address, JournalDelta)> = self.branch.current_changes
-			.iter()
-			.map(|&(ref addr, ref delta)| (addr.clone(), delta.into()))
-			.collect();
-
-		// write out the new journal entry.
-		{
-			let key = id_key(&id);
-			let mut stream = RlpStream::new_list(2);
-			stream.append(&parent_id);
-			stream.begin_list(pending.len());
-
-			for &(ref addr, ref delta) in pending.iter() {
-				stream.begin_list(2);
-				stream.append(addr).append(delta);
-			}
-
-			batch.put_vec(self.col, &key, stream.out());
-		}
-
-		self.branch.accrue(id);
-		let candidates: Vec<H256> = {
-			let entries = self.journal.entries.entry(now).or_insert_with(HashMap::new);
-			entries.insert(id, JournalEntry {
-				parent: parent_id,
-				entries: pending,
-			});
-
-			entries.keys().cloned().collect()
+		let j_entry = JournalEntry {
+			parent: parent_id,
+			entries: ::std::mem::replace(&mut self.overlay, HashMap::new()),
 		};
 
-
-		// write out the new ids key.
-		{
-			let key = journal_key(&now);
-			batch.put_vec(self.col, &key, ::rlp::encode(&candidates).to_vec());
+		for addr in j_entry.entries.keys() {
+			journal.modifications.entry(*addr).or_insert_with(BTreeSet::new).insert((now, id));
 		}
+
+		let encoded = ::rlp::encode(&j_entry);
+		batch.put(self.col, &id_key(&id), &encoded);
+
+		journal.entries.insert((now, id), j_entry);
+		journal.write_era(self.col, batch, now);
 	}
 
-	/// Mark an era as canonical. May invalidate the current branch view.
-	///
-	/// This immediately sets the last committed hash, leading to a potential
-	/// race condition if the meta DB is when .
-	/// As such, it's not suitable to be used outside of the main sync.
+	/// Mark a candidate for an era as canonical, applying its changes
+	/// and invalidating its siblings.
 	pub fn mark_canonical(&mut self, batch: &mut DBTransaction, end_era: u64, canon_id: H256) {
 		trace!(target: "meta_db", "mark_canonical: ({}, {})", end_era, canon_id);
+		let mut journal = self.journal.write();
 
-		let entries = match self.journal.entries.remove(&end_era) {
-			Some(entries) => entries,
-			None => {
-				warn!("No meta DB journal for era={}", end_era);
-				return;
+		let candidate_hashes: Vec<_> = journal.entries.keys()
+			.skip_while(|&&(ref e, _)| e < &end_era)
+			.take_while(|&&(e, _)| e == end_era)
+			.map(|&(_, ref h)| h.clone())
+			.collect();
+
+		for id in candidate_hashes {
+			let entry = journal.entries.remove(&(end_era, id)).expect("entries known to contain this key; qed");
+			batch.delete(self.col, &id_key(&id));
+
+			// remove modifications entries.
+			for addr in entry.entries.keys() {
+				if let Some(ref mut modifications) = journal.modifications.get_mut(addr) {
+					modifications.remove(&(end_era, id));
+				}
 			}
-		};
 
-		// TODO: delete old branches building off of invalidated candidates.
-		for (id, entry) in entries {
-			let key = id_key(&id);
-			batch.delete(self.col, &key[..]);
-
+			// apply canonical changes.
 			if id == canon_id {
-				for (address, delta) in entry.entries {
+				for (addr, delta) in entry.entries {
 					match delta {
-						JournalDelta::Destroy => batch.delete(self.col, &*address),
-						JournalDelta::Set(meta) =>
-							batch.put_vec(self.col, &*address, ::rlp::encode(&meta).to_vec()),
+						Some(delta) => batch.put(self.col, &addr, &*::rlp::encode(&delta)),
+						None => batch.delete(self.col, &addr),
 					}
 				}
 			}
 		}
 
-		// remove the list of hashes.
-		let key = journal_key(&end_era);
-		batch.delete(self.col, &key[..]);
+		// update meta keys in the database.
+		let mut base_stream = RlpStream::new_list(2);
+		base_stream.append(&journal.canon_base.0).append(&journal.canon_base.1);
 
-		self.last_committed = (canon_id, end_era);
-
-		// prune the branch view and reset it if it's based off a non-canonical
-		// block.
-		if !self.branch.remove_ancient(&canon_id) {
-			self.clear_branch();
-		}
-
-		{
-			let mut stream = RlpStream::new_list(2);
-			stream.append(&self.last_committed.0).append(&self.last_committed.1);
-			batch.put_vec(self.col, b"latest", stream.out())
-		}
+		batch.put(self.col, b"base", &*base_stream.drain());
+		batch.delete(self.col, &journal_key(&end_era));
 	}
 
-	/// Query the state of an account. A return value
-	/// of `None` means that the account does not exist on this branch.
-	pub fn get(&self, address: &Address) -> Option<AccountMeta> {
-		self.branch.overlay.get(address).map(|o| o.clone()).unwrap_or_else(|| {
-			match self.db.get(self.col, &*address) {
-				Ok(maybe) => maybe.map(|x| ::rlp::decode(&x)),
-				Err(e) => {
-					warn!("Low-level database error: {}", e);
-					None
-				}
+	/// Query the state of an account at a given block. A return value
+	/// of `None` means that the account definitively does not exist on this branch.
+	/// This will query the overlay of pending changes first.
+	///
+	/// Will fail on database error, state pruned, or unexpected missing journal entry.
+	pub fn get(&self, address: &Address, at: (u64, H256)) -> Result<Option<AccountMeta>, Error> {
+		trace!(target: "meta_db", "get: {:?} at {:?}", address, at);
+
+		let get_from_db = || match self.db.get(self.col, &*address) {
+			Ok(meta) => Ok(meta.map(|x| ::rlp::decode(&x))),
+			Err(e) => Err(Error::Database(e)),
+		};
+
+		if let Some(meta) = self.overlay.get(address) {
+			return Ok(meta.clone());
+		}
+
+		let journal = self.journal.read();
+
+		// fast path for base query.
+		if at == journal.canon_base {
+			return get_from_db();
+		}
+
+		let (mut era, mut id) = at;
+		let mut entry = try!(journal.entries.get(&(era, id)).ok_or_else(|| Error::MissingJournalEntry(era, id)));
+
+		// iterate the modifications for this account in reverse order (by id),
+		for &(mod_era, ref mod_id) in journal.modifications.get(address).into_iter().flat_map(|m| m.iter().rev()) {
+			if era <= journal.canon_base.0 { break }
+
+			// walk the relevant path down the journal backwards until we're aligned with
+			// the era
+			while era > mod_era {
+				id = entry.parent;
+				era -= 1;
+				entry = try!(journal.entries.get(&(era, id)).ok_or_else(|| Error::MissingJournalEntry(era, id)));
 			}
-		})
+
+			// then continue until we reach the right ID or have to traverse further down.
+			if mod_id != &id { continue }
+
+			assert_eq!((era, &id), (mod_era, mod_id), "journal traversal led to wrong entry");
+			return Ok(entry.entries.get(address)
+				.expect("modifications set always contains correct entries; qed")
+				.clone());
+		}
+
+		if era <= journal.canon_base.0 && id != journal.canon_base.1 {
+			return Err(Error::StatePruned(era, id));
+		}
+
+		// no known modifications -- fetch from database.
+		get_from_db()
 	}
 
-	/// Set the given account's details on this address.
-	/// This will completely overwrite any other entry.
+	/// Set the given account's details on this address in the pending changes
+	/// overlay.
+	/// This will overwrite any previous changes to the overlay,
+	/// and will be queried prior to the journal.
 	pub fn set(&mut self, address: Address, meta: AccountMeta) {
-		match self.get(&address) {
-			Some(prev) => {
-				self.branch.overlay.insert(address.clone(), Some(meta.clone()));
-				self.branch.current_changes.push((address, BranchDelta::Replace(meta, prev)));
-			}
-			None => {
-				self.branch.overlay.insert(address.clone(), Some(meta.clone()));
-				self.branch.current_changes.push((address, BranchDelta::Init(meta)));
-			}
-		}
+		self.overlay.insert(address, Some(meta));
 	}
 
 	/// Destroy the account details here.
 	pub fn remove(&mut self, address: Address) {
-		// `None` shouldn't be strictly possible, but we actually re-remove all
-		// accounts in the state cache which were just nonexistant at the time of
-		// query.
-		if let Some(prev) = self.get(&address) {
-			self.branch.overlay.insert(address.clone(), None);
-			self.branch.current_changes.push((address, BranchDelta::Destroy(prev)));
-		}
-	}
-
-	/// Set the head to the requested branch.
-	/// The block must be in the journal already.
-	///
-	/// Will fail if the common ancestor and both branches aren't in the journal.
-	/// This shouldn't be possible for anything within the history period.
-	///
-	/// Note that this will point to the meta state at the point immediately
-	/// after the given id.
-	///
-	/// On failure, branch state is undefined and must be set to a possible
-	/// branch before continued use.
-	pub fn branch_to(&mut self, new_era: u64, hash: H256) -> Result<(), ReorgImpossible> {
-		trace!(target: "meta_db", "branch to ({}, {})", new_era, hash);
-
-		// as a macro since closures borrow.
-		macro_rules! journal_entry {
-			($era: expr, $id: expr) => {{
-				trace!(target: "meta_db", "fetching journal entry: ({}, {})", $era, $id);
-
-				self.journal.entries.get($era)
-					.and_then(|entries| entries.get($id)).ok_or(ReorgImpossible)
-			}}
-		}
-
-		// first things first, clear any uncommitted changes on the branch.
-		self.branch.clear_current();
-
-		if new_era == self.last_committed.1 {
-			self.clear_branch();
-
-			return if hash != self.last_committed.0 {
-				Err(ReorgImpossible)
-			} else {
-				Ok(())
-			}
-		}
-
-		// check for equivalent branch.
-		{
-			let branch_head = self.branch.latest_id()
-				.unwrap_or(&self.last_committed.0);
-
-			if new_era == self.branch_era() && branch_head == &hash { return Ok(()) }
-		}
-
-		let mut to_era = new_era;
-		let mut to_branch = vec![];
-		let mut ancestor_hash = hash.clone();
-
-		trace!(target: "meta_db", "reorg necessary: branch_era={}, new_era={}", self.branch_era(), new_era);
-
-		// reset to same level by rolling back the branch
-		while self.branch_era() > to_era {
-			trace!(target: "meta_db", "rolling back branch once.");
-
-			// protected by check above.
-			self.branch.rollback().expect("branch known to have enough journalled ancestors; qed");
-		}
-
-		while to_era > self.branch_era() {
-			let entry = try!(journal_entry!(&to_era, &ancestor_hash));
-
-			to_branch.push(ancestor_hash);
-			ancestor_hash = entry.parent;
-			to_era -= 1;
-		}
-
-		// rewind the branch until we find a common ancestor
-		while self.branch.latest_id().unwrap_or(&self.last_committed.0) != &ancestor_hash {
-			trace!(target: "meta_db", "rolling back branch");
-
-			try!(self.branch.rollback().ok_or(ReorgImpossible));
-
-			let entry = try!(journal_entry!(&to_era, &ancestor_hash));
-
-			to_branch.push(ancestor_hash);
-			ancestor_hash = entry.parent;
-			to_era -= 1;
-		}
-
-		// and then walk forward, accruing all of the fork branch's changes into
-		// the branch.
-		for (era, id) in (to_era .. new_era).map(|e| e + 1).zip(to_branch.into_iter().rev()) {
-			trace!(target: "meta_db", "accruing changes from ({}, {})", era, id);
-
-			let entry = journal_entry!(&era, &id).expect("this entry fetched previously; qed");
-
-			self.branch.accrue_journal(id, &entry.entries, &*self.db, self.col);
-		}
-
-		assert_eq!(self.branch_era(), new_era);
-		assert_eq!(self.branch.latest_id(), Some(&hash));
-
-		Ok(())
-	}
-
-	/// Whether the meta database is empty.
-	pub fn is_empty(&self) -> bool {
-		self.last_committed.1 > 0 || self.journal.entries.is_empty()
-	}
-
-	// set the branch to completely empty.
-	fn clear_branch(&mut self) {
-		self.branch = MetaBranch {
-			ancestors: VecDeque::new(),
-			current_changes: Vec::new(),
-			overlay: HashMap::new(),
-			recent: HashMap::new(),
-		};
-	}
-
-	// the branch's era.
-	fn branch_era(&self) -> u64 {
-		self.last_committed.1 + self.branch.len()
-	}
-}
-
-// A reorg-friendly view over a branch based on the `MetaDB`.
-#[derive(Debug, PartialEq)]
-struct MetaBranch {
-	ancestors: VecDeque<(H256, Vec<(Address, BranchDelta)>)>,
-	current_changes: Vec<(Address, BranchDelta)>,
-
-	// current state of account meta, accruing from the database's last
-	// to the current changes. `None` means killed, missing means no change from db,
-	// present means known value.
-	overlay: HashMap<Address, Option<AccountMeta>>,
-
-	// recently touched addresses -- maps addresses to refcount.
-	// when we pop an ancestor. current changes aren't counted
-	// until accrued.
-	recent: HashMap<Address, u32>,
-}
-
-impl MetaBranch {
-	// The length of this branch.
-	fn len(&self) -> u64 { self.ancestors.len() as u64 }
-
-	// latest tracked id.
-	fn latest_id(&self) -> Option<&H256> {
-		self.ancestors.back().map(|&(ref hash, _)| hash)
-	}
-
-	// clear current changes.
-	fn clear_current(&mut self) {
-		self.current_changes.clear()
-	}
-
-	// pop an ancestor and roll back its changes. Returns the hash
-	// of the ancestor just popped, or none if there isn't one.
-	fn rollback(&mut self) -> Option<H256> {
-		match self.ancestors.pop_back() {
-			Some((hash, delta)) => {
-				// process changes in reverse for proper backtracking.
-				for &(ref address, ref delta) in delta.iter().rev() {
-					match *delta {
-						BranchDelta::Destroy(ref prev) => self.overlay.insert(address.clone(), Some(prev.clone())),
-						BranchDelta::Init(_) => self.overlay.remove(address),
-						BranchDelta::Replace(ref prev, _) => self.overlay.insert(address.clone(), Some(prev.clone())),
-					};
-				}
-
-				// prune out anything that only this touched after the rollback,
-				// in case something from the backing database was restored.
-				self.prune_recent(delta.into_iter().map(|(addr, _)| addr));
-
-				Some(hash)
-			}
-			None => None,
-		}
-	}
-
-	// Accrue current changes under the given hash, incrementing the latest era.
-	fn accrue(&mut self, hash: H256) {
-		let current_changes = ::std::mem::replace(&mut self.current_changes, Vec::new());
-
-		// mark these items as recently changed.
-		for addr in current_changes.iter().map(|&(ref addr, _)| addr).cloned() {
-			*self.recent.entry(addr).or_insert(0) += 1;
-		}
-
-		self.ancestors.push_back((hash, current_changes));
-	}
-
-	// Accrue deltas from the journal.
-	// The hash deltas here must immediately follow the block this branch tracks.
-	// This is a relatively expensive operation, but should only be triggered on reorganizations.
-	fn accrue_journal(&mut self, hash: H256, j_deltas: &[(Address, JournalDelta)], db: &Database, col: Option<u32>) {
-		let mut deltas = Vec::with_capacity(j_deltas.len());
-
-		for &(ref addr, ref j_delta) in j_deltas {
-			// update the recent hashmap to denote this item.
-			*self.recent.entry(addr.clone()).or_insert(0) += 1;
-
-			let prev: Option<AccountMeta> = self.overlay.get(addr).map(|o| o.clone()).unwrap_or_else(|| {
-				match db.get(col, &*addr) {
-					Ok(maybe_prev) => maybe_prev.map(|x| ::rlp::decode(&x)),
-					Err(e) => {
-						warn!("Low-level database error: {}", e);
-						None
-					}
-				}
-			});
-
-			let delta = match *j_delta {
-				JournalDelta::Destroy => {
-					let prev = prev.expect("cannot destroy without account existing; qed");
-					self.overlay.insert(addr.clone(), None);
-					BranchDelta::Destroy(prev)
-				}
-				JournalDelta::Set(ref meta) => {
-					self.overlay.insert(addr.clone(), Some(meta.clone()));
-
-					match prev {
-						Some(prev) => BranchDelta::Replace(meta.clone(), prev),
-						None => BranchDelta::Init(meta.clone()),
-					}
-				}
-			};
-
-			deltas.push((addr.clone(), delta));
-		}
-
-		self.ancestors.push_back((hash, deltas));
-	}
-
-	// decrement the refcount in `recent` for any address in the given
-	// iterable.
-	fn prune_recent<I>(&mut self, iter: I) where I: IntoIterator<Item=Address> {
-		use std::collections::hash_map::Entry;
-
-		for addr in iter {
-			match self.recent.entry(addr) {
-				Entry::Occupied(mut x) => {
-					*x.get_mut() -= 1;
-					if *x.get() == 0 {
-						x.remove();
-					}
-				}
-				_ => {}
-			}
-		}
-	}
-
-	// get rid of the most ancient ancestor, and remove any stale entries from the overlay.
-	// if the ancient ancestor isn't equal to the canon id, returns false, true otherwise.
-	// this signals that the branch needs to be wiped.
-	fn remove_ancient(&mut self, canon_id: &H256) -> bool {
-		let delta = match self.ancestors.pop_front() {
-			Some((hash, delta)) => if &hash == canon_id {
-				trace!(target: "meta_db", "removed ancient ancestor {} from branch.", hash);
-				delta
-			} else {
-				return false
-			},
-			_ => { return false },
-		};
-
-		self.prune_recent(delta.into_iter().map(|(addr, _)| addr));
-		true
+		self.overlay.insert(address, None);
 	}
 }
 
@@ -653,55 +412,8 @@ mod tests {
 		}
 
 		let journal = meta_db.journal;
-
 		let meta_db = MetaDB::new(db.clone(), None, &Default::default()).unwrap();
 
-		assert_eq!(journal, meta_db.journal);
-	}
-
-	#[test]
-	fn mark_canonical_keeps_branch() {
-		let path = RandomTempPath::create_dir();
-		let db = Arc::new(Database::open_default(&*path.as_path().to_string_lossy()).unwrap());
-		let mut meta_db = MetaDB::new(db.clone(), None, &Default::default()).unwrap();
-
-		for i in 0..10u64 {
-			let this = U256::from(i + 1);
-			let parent = U256::from(i);
-
-			let mut batch = db.transaction();
-			meta_db.journal_under(&mut batch, i + 1, this.into(), parent.into());
-			db.write(batch).unwrap();
-		}
-
-		assert_eq!(meta_db.branch_era(), 10);
-
-		let mut batch = db.transaction();
-		meta_db.mark_canonical(&mut batch, 1, U256::from(1).into());
-		db.write(batch).unwrap();
-
-		assert_eq!(meta_db.branch_era(), 10);
-		assert!(meta_db.journal.entries.get(&2).unwrap().get(&U256::from(2).into()).is_some());
-	}
-
-	#[test]
-	fn reorg_base_to_head() {
-		let path = RandomTempPath::create_dir();
-		let db = Arc::new(Database::open_default(&*path.as_path().to_string_lossy()).unwrap());
-		let mut meta_db = MetaDB::new(db.clone(), None, &Default::default()).unwrap();
-
-		for i in 0..10u64 {
-			let this = U256::from(i + 1);
-			let parent = U256::from(i);
-
-			let mut batch = db.transaction();
-			meta_db.journal_under(&mut batch, i + 1, this.into(), parent.into());
-			db.write(batch).unwrap();
-		}
-
-		meta_db.clear_branch();
-		assert!(meta_db.journal.entries.get(&1).unwrap().get(&U256::from(1).into()).is_some());
-
-		meta_db.branch_to(10, U256::from(10).into()).unwrap();
+		assert_eq!(&*journal.read(), &*meta_db.journal.read());
 	}
 }
