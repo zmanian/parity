@@ -14,8 +14,6 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::cell::Ref;
-
 use util::*;
 use super::u256_to_address;
 use evm::{self, CostType};
@@ -108,10 +106,10 @@ impl<Gas: CostType> Gasometer<Gas> {
 	/// it will be the amount of gas that the current context provides to the child context.
 	pub fn requirements<Ext: evm::Ext>(
 		&mut self,
+		stack: &ShareableStack<U256>,
 		ext: &Ext,
 		instruction: Instruction,
 		info: &InstructionInfo,
-		stack: Ref<ShareableStack<U256>>,
 		current_mem_size: usize,
 	) -> evm::Result<InstructionRequirements<Gas>> {
 		let schedule = ext.schedule();

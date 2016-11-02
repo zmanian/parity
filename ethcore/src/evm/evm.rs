@@ -20,6 +20,7 @@ use std::{ops, cmp, fmt};
 use util::{U128, U256, U512, Uint};
 use action_params::ActionParams;
 use evm::Ext;
+use evm::SharedStack;
 
 /// Evm errors.
 #[derive(Debug, Clone, Copy)]
@@ -180,7 +181,7 @@ pub trait Evm<E: Ext> {
 	/// This function should be used to execute transaction.
 	///
 	/// It returns either an error or a known amount of gas left.
-	fn exec(&mut self, params: ActionParams, ext: E) -> Result<U256>;
+	fn exec(&mut self, params: ActionParams, ext: E, shared_stack: Option<SharedStack>) -> (Result<U256>, SharedStack);
 }
 
 #[cfg(test)]

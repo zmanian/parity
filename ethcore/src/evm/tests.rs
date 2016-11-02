@@ -18,7 +18,7 @@ use util::*;
 use action_params::{ActionParams, ActionValue};
 use env_info::EnvInfo;
 use types::executed::CallType;
-use evm::{self, Ext, Schedule, Factory, VMType, ContractCreateResult, MessageCallResult};
+use evm::{self, Ext, Schedule, Factory, VMType, ContractCreateResult, MessageCallResult, SharedStack};
 use std::fmt::Debug;
 
 pub struct FakeLogEntry {
@@ -100,7 +100,7 @@ impl Ext for FakeExt {
 		self.data.lock().blockhashes.get(number).unwrap_or(&H256::new()).clone()
 	}
 
-	fn create(&mut self, gas: &U256, value: &U256, code: &[u8]) -> ContractCreateResult {
+	fn create(&mut self, gas: &U256, value: &U256, code: &[u8], stack: Option<SharedStack>) -> (ContractCreateResult, SharedStack) {
 		self.data.lock().calls.insert(FakeCall {
 			call_type: FakeCallType::Create,
 			gas: *gas,
@@ -110,7 +110,7 @@ impl Ext for FakeExt {
 			data: code.to_vec(),
 			code_address: None
 		});
-		ContractCreateResult::Failed
+		(ContractCreateResult::Failed, stack.unwrap_or_default())
 	}
 
 	fn call(&mut self,
@@ -121,8 +121,9 @@ impl Ext for FakeExt {
 			data: &[u8],
 			code_address: &Address,
 			_output: &mut [u8],
-			_call_type: CallType
-		) -> MessageCallResult {
+			_call_type: CallType,
+			stack: Option<SharedStack>,
+		) -> (MessageCallResult, SharedStack) {
 
 		self.data.lock().calls.insert(FakeCall {
 			call_type: FakeCallType::Call,
@@ -133,7 +134,7 @@ impl Ext for FakeExt {
 			data: data.to_vec(),
 			code_address: Some(code_address.clone())
 		});
-		MessageCallResult::Success(*gas)
+		(MessageCallResult::Success(*gas), stack.unwrap_or_default())
 	}
 
 	fn extcode(&self, address: &Address) -> Arc<Bytes> {
@@ -187,8 +188,8 @@ fn run_default_vm(factory: super::Factory, params: ActionParams) -> (U256, FakeE
 }
 
 fn run_vm(factory: super::Factory, params: ActionParams, ext: FakeExt) -> evm::Result<U256> {
-	let mut vm : Box<evm::Evm<FakeExt>> = factory.create(params.gas, Default::default());
-	vm.exec(params, ext)
+	let mut vm : Box<evm::Evm<FakeExt>> = factory.create(params.gas);
+	vm.exec(params, ext, None).0
 }
 
 #[test]
@@ -202,11 +203,11 @@ fn test_stack_underflow() {
 	params.code = Some(Arc::new(code));
 
 	let result = {
-		let mut vm = super::Factory::new(VMType::Interpreter, 1).create(params.gas, Default::default());
-		vm.exec(params, FakeExt::new().0)
+		let mut vm = super::Factory::new(VMType::Interpreter, 1).create(params.gas);
+		vm.exec(params, FakeExt::new().0, None)
 	};
 
-	match result.unwrap_err() {
+	match result.0.unwrap_err() {
 		evm::Error::StackUnderflow {wanted, on_stack, ..} => {
 			assert_eq!(wanted, 2);
 			assert_eq!(on_stack, 0);

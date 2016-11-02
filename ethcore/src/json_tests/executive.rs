@@ -223,7 +223,6 @@ fn do_json_test_for(vm_type: &VMType, json_data: &[u8]) -> Vec<String> {
 				&engine,
 				&vm_factory,
 				0,
-				shared_stack.clone(),
 				OriginInfo::from(&params),
 				&mut substate,
 				OutputPolicy::Return(BytesRef::Flexible(&mut output), None),

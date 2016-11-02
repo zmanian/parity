@@ -62,7 +62,6 @@ pub struct Executive<'a> {
 	engine: &'a Engine,
 	vm_factory: &'a Factory,
 	depth: usize,
-	stack: SharedStack<U256>,
 }
 
 impl<'a> Executive<'a> {
@@ -74,7 +73,6 @@ impl<'a> Executive<'a> {
 			engine: engine,
 			vm_factory: vm_factory,
 			depth: 0,
-			stack: SharedStack::default(),
 		}
 	}
 
@@ -85,7 +83,6 @@ impl<'a> Executive<'a> {
 		engine: &'a Engine,
 		vm_factory: &'a Factory,
 		parent_depth: usize,
-		stack: SharedStack<U256>,
 	) -> Self {
 		Executive {
 			state: state,
@@ -93,7 +90,6 @@ impl<'a> Executive<'a> {
 			engine: engine,
 			vm_factory: vm_factory,
 			depth: parent_depth + 1,
-			stack: stack,
 		}
 	}
 
@@ -112,7 +108,6 @@ impl<'a> Executive<'a> {
 			self.engine,
 			self.vm_factory,
 			self.depth,
-			self.stack.clone(),
 			origin_info,
 			substate,
 			output,
@@ -206,7 +201,7 @@ impl<'a> Executive<'a> {
 					data: None,
 					call_type: CallType::None,
 				};
-				(self.create(params, &mut substate, &mut tracer, &mut vm_tracer), vec![])
+				(self.create(params, &mut substate, &mut tracer, &mut vm_tracer, None).0, vec![])
 			},
 			Action::Call(ref address) => {
 				let params = ActionParams {
@@ -223,7 +218,7 @@ impl<'a> Executive<'a> {
 					call_type: CallType::Call,
 				};
 				let mut out = vec![];
-				(self.call(params, &mut substate, BytesRef::Flexible(&mut out), &mut tracer, &mut vm_tracer), out)
+				(self.call(params, &mut substate, BytesRef::Flexible(&mut out), &mut tracer, &mut vm_tracer, None).0, out)
 			}
 		};
 
@@ -237,18 +232,18 @@ impl<'a> Executive<'a> {
 		unconfirmed_substate: &mut Substate,
 		output_policy: OutputPolicy,
 		tracer: &mut T,
-		vm_tracer: &mut V
-	) -> evm::Result<U256> where T: Tracer, V: VMTracer {
+		vm_tracer: &mut V,
+		stack: Option<SharedStack>,
+	) -> (evm::Result<U256>, SharedStack) where T: Tracer, V: VMTracer {
 
 		let depth_threshold = ::io::LOCAL_STACK_SIZE.with(|sz| sz.get() / STACK_SIZE_PER_DEPTH);
 
 		// Ordinary execution - keep VM in the same thread
 		if (self.depth + 1) % depth_threshold != 0 {
 			let vm_factory = self.vm_factory;
-			let stack = self.stack.clone();
 			let ext = self.as_externalities(OriginInfo::from(&params), unconfirmed_substate, output_policy, tracer, vm_tracer);
 			trace!(target: "executive", "ext.schedule.have_delegate_call: {}", ext.schedule().have_delegate_call);
-			return vm_factory.create(params.gas, stack).exec(params, ext);
+			return vm_factory.create(params.gas).exec(params, ext, stack);
 		}
 
 		// Start in a new thread to reset the stack.
@@ -256,12 +251,10 @@ impl<'a> Executive<'a> {
 		// https://github.com/aturon/crossbeam/issues/16
 		crossbeam::scope(|scope| {
 			let vm_factory = self.vm_factory;
-			let stack = self.stack.clone();
 			let ext = self.as_externalities(OriginInfo::from(&params), unconfirmed_substate, output_policy, tracer, vm_tracer);
 
 			scope.spawn(move || {
-				// TODO [todr] Either consider changing shared_stack to Arc or start a new stack here?
-				vm_factory.create(params.gas, stack).exec(params, ext)
+				vm_factory.create(params.gas).exec(params, ext, stack)
 			})
 		}).join()
 	}
@@ -276,8 +269,9 @@ impl<'a> Executive<'a> {
 		substate: &mut Substate,
 		mut output: BytesRef,
 		tracer: &mut T,
-		vm_tracer: &mut V
-	) -> evm::Result<U256> where T: Tracer, V: VMTracer {
+		vm_tracer: &mut V,
+		stack: Option<SharedStack>,
+	) -> (evm::Result<U256>, SharedStack) where T: Tracer, V: VMTracer {
 		// backup used in case of running out of gas
 		self.state.checkpoint();
 
@@ -315,14 +309,14 @@ impl<'a> Executive<'a> {
 					);
 				}
 
-				Ok(params.gas - cost)
+				(Ok(params.gas - cost), stack.unwrap_or_default())
 			} else {
 				// just drain the whole gas
 				self.state.revert_to_checkpoint();
 
 				tracer.trace_failed_call(trace_info, vec![], evm::Error::OutOfGas.into());
 
-				Err(evm::Error::OutOfGas)
+				(Err(evm::Error::OutOfGas), stack.unwrap_or_default())
 			}
 		} else {
 			let trace_info = tracer.prepare_trace_call(&params);
@@ -338,16 +332,21 @@ impl<'a> Executive<'a> {
 				// TODO: make ActionParams pass by ref then avoid copy altogether.
 				let mut subvmtracer = vm_tracer.prepare_subtrace(params.code.as_ref().expect("scope is conditional on params.code.is_some(); qed"));
 
-				let res = {
-					self.exec_vm(params, &mut unconfirmed_substate, OutputPolicy::Return(output, trace_output.as_mut()), &mut subtracer, &mut subvmtracer)
-				};
+				let res = self.exec_vm(
+					params,
+					&mut unconfirmed_substate,
+					OutputPolicy::Return(output, trace_output.as_mut()),
+					&mut subtracer,
+					&mut subvmtracer,
+					stack,
+				);
 
 				vm_tracer.done_subtrace(subvmtracer);
 
-				trace!(target: "executive", "res={:?}", res);
+				trace!(target: "executive", "res={:?}", res.0);
 
 				let traces = subtracer.traces();
-				match res {
+				match res.0 {
 					Ok(gas_left) => tracer.trace_call(
 						trace_info,
 						gas - gas_left,
@@ -359,7 +358,7 @@ impl<'a> Executive<'a> {
 
 				trace!(target: "executive", "substate={:?}; unconfirmed_substate={:?}\n", substate, unconfirmed_substate);
 
-				self.enact_result(&res, substate, unconfirmed_substate);
+				self.enact_result(&res.0, substate, unconfirmed_substate);
 				trace!(target: "executive", "enacted: substate={:?}\n", substate);
 				res
 			} else {
@@ -367,7 +366,7 @@ impl<'a> Executive<'a> {
 				self.state.discard_checkpoint();
 
 				tracer.trace_call(trace_info, U256::zero(), trace_output, vec![]);
-				Ok(params.gas)
+				(Ok(params.gas), stack.unwrap_or_default())
 			}
 		}
 	}
@@ -380,8 +379,9 @@ impl<'a> Executive<'a> {
 		params: ActionParams,
 		substate: &mut Substate,
 		tracer: &mut T,
-		vm_tracer: &mut V
-	) -> evm::Result<U256> where T: Tracer, V: VMTracer {
+		vm_tracer: &mut V,
+		stack: Option<SharedStack>,
+	) -> (evm::Result<U256>, SharedStack) where T: Tracer, V: VMTracer {
 		// backup used in case of running out of gas
 		self.state.checkpoint();
 
@@ -405,13 +405,18 @@ impl<'a> Executive<'a> {
 
 		let mut subvmtracer = vm_tracer.prepare_subtrace(params.code.as_ref().expect("two ways into create (Externalities::create and Executive::transact_with_tracer); both place `Some(...)` `code` in `params`; qed"));
 
-		let res = {
-			self.exec_vm(params, &mut unconfirmed_substate, OutputPolicy::InitContract(trace_output.as_mut()), &mut subtracer, &mut subvmtracer)
-		};
+		let res = self.exec_vm(
+			params,
+			&mut unconfirmed_substate,
+			OutputPolicy::InitContract(trace_output.as_mut()),
+			&mut subtracer,
+			&mut subvmtracer,
+			stack,
+		);
 
 		vm_tracer.done_subtrace(subvmtracer);
 
-		match res {
+		match res.0 {
 			Ok(gas_left) => tracer.trace_create(
 				trace_info,
 				gas - gas_left,
@@ -422,7 +427,7 @@ impl<'a> Executive<'a> {
 			Err(e) => tracer.trace_failed_create(trace_info, subtracer.traces(), e.into())
 		};
 
-		self.enact_result(&res, substate, unconfirmed_substate);
+		self.enact_result(&res.0, substate, unconfirmed_substate);
 		res
 	}
 
@@ -570,7 +575,7 @@ mod tests {
 
 		let gas_left = {
 			let mut ex = Executive::new(&mut state, &info, &engine, &factory);
-			ex.create(params, &mut substate, &mut NoopTracer, &mut NoopVMTracer).unwrap()
+			ex.create(params, &mut substate, &mut NoopTracer, &mut NoopVMTracer, None).0.unwrap()
 		};
 
 		assert_eq!(gas_left, U256::from(79_975));
@@ -629,7 +634,7 @@ mod tests {
 
 		let gas_left = {
 			let mut ex = Executive::new(&mut state, &info, &engine, &factory);
-			ex.create(params, &mut substate, &mut NoopTracer, &mut NoopVMTracer).unwrap()
+			ex.create(params, &mut substate, &mut NoopTracer, &mut NoopVMTracer, None).0.unwrap()
 		};
 
 		assert_eq!(gas_left, U256::from(62_976));
@@ -691,7 +696,7 @@ mod tests {
 		let gas_left = {
 			let mut ex = Executive::new(&mut state, &info, &engine, &factory);
 			let output = BytesRef::Fixed(&mut[0u8;0]);
-			ex.call(params, &mut substate, output, &mut tracer, &mut vm_tracer).unwrap()
+			ex.call(params, &mut substate, output, &mut tracer, &mut vm_tracer, None).0.unwrap()
 		};
 
 		assert_eq!(gas_left, U256::from(44_752));
@@ -801,7 +806,7 @@ mod tests {
 
 		let gas_left = {
 			let mut ex = Executive::new(&mut state, &info, &engine, &factory);
-			ex.create(params.clone(), &mut substate, &mut tracer, &mut vm_tracer).unwrap()
+			ex.create(params.clone(), &mut substate, &mut tracer, &mut vm_tracer, None).0.unwrap()
 		};
 
 		assert_eq!(gas_left, U256::from(96_776));
@@ -887,7 +892,7 @@ mod tests {
 
 		let gas_left = {
 			let mut ex = Executive::new(&mut state, &info, &engine, &factory);
-			ex.create(params, &mut substate, &mut NoopTracer, &mut NoopVMTracer).unwrap()
+			ex.create(params, &mut substate, &mut NoopTracer, &mut NoopVMTracer, None).0.unwrap()
 		};
 
 		assert_eq!(gas_left, U256::from(62_976));
@@ -939,7 +944,7 @@ mod tests {
 
 		{
 			let mut ex = Executive::new(&mut state, &info, &engine, &factory);
-			ex.create(params, &mut substate, &mut NoopTracer, &mut NoopVMTracer).unwrap();
+			ex.create(params, &mut substate, &mut NoopTracer, &mut NoopVMTracer, None).0.unwrap();
 		}
 
 		assert_eq!(substate.contracts_created.len(), 1);
@@ -1000,7 +1005,7 @@ mod tests {
 
 		let gas_left = {
 			let mut ex = Executive::new(&mut state, &info, &engine, &factory);
-			ex.call(params, &mut substate, BytesRef::Fixed(&mut []), &mut NoopTracer, &mut NoopVMTracer).unwrap()
+			ex.call(params, &mut substate, BytesRef::Fixed(&mut []), &mut NoopTracer, &mut NoopVMTracer, None).0.unwrap()
 		};
 
 		assert_eq!(gas_left, U256::from(73_237));
@@ -1045,7 +1050,7 @@ mod tests {
 
 		let gas_left = {
 			let mut ex = Executive::new(&mut state, &info, &engine, &factory);
-			ex.call(params, &mut substate, BytesRef::Fixed(&mut []), &mut NoopTracer, &mut NoopVMTracer).unwrap()
+			ex.call(params, &mut substate, BytesRef::Fixed(&mut []), &mut NoopTracer, &mut NoopVMTracer, None).0.unwrap()
 		};
 
 		assert_eq!(gas_left, U256::from(59_870));
@@ -1247,7 +1252,7 @@ mod tests {
 
 		let result = {
 			let mut ex = Executive::new(&mut state, &info, &engine, &factory);
-			ex.create(params, &mut substate, &mut NoopTracer, &mut NoopVMTracer)
+			ex.create(params, &mut substate, &mut NoopTracer, &mut NoopVMTracer, None).0
 		};
 
 		match result {

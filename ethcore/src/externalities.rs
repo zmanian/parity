@@ -63,7 +63,6 @@ pub struct Externalities<'a, T, V> where T: 'a + Tracer, V: 'a + VMTracer {
 	engine: &'a Engine,
 	vm_factory: &'a Factory,
 	depth: usize,
-	stack: SharedStack<U256>,
 	origin_info: OriginInfo,
 	substate: &'a mut Substate,
 	schedule: Schedule,
@@ -80,7 +79,6 @@ impl<'a, T, V> Externalities<'a, T, V> where T: 'a + Tracer, V: 'a + VMTracer {
 		engine: &'a Engine,
 		vm_factory: &'a Factory,
 		depth: usize,
-		stack: SharedStack<U256>,
 		origin_info: OriginInfo,
 		substate: &'a mut Substate,
 		output: OutputPolicy<'a, 'a>,
@@ -93,7 +91,6 @@ impl<'a, T, V> Externalities<'a, T, V> where T: 'a + Tracer, V: 'a + VMTracer {
 			engine: engine,
 			vm_factory: vm_factory,
 			depth: depth,
-			stack: stack,
 			origin_info: origin_info,
 			substate: substate,
 			schedule: engine.schedule(env_info),
@@ -138,7 +135,7 @@ impl<'a, T, V> Ext for Externalities<'a, T, V> where T: 'a + Tracer, V: 'a + VMT
 		}
 	}
 
-	fn create(&mut self, gas: &U256, value: &U256, code: &[u8]) -> ContractCreateResult {
+	fn create(&mut self, gas: &U256, value: &U256, code: &[u8], stack: Option<SharedStack>) -> (ContractCreateResult, SharedStack) {
 		// create new contract address
 		let address = contract_address(&self.origin_info.address, &self.state.nonce(&self.origin_info.address));
 
@@ -164,16 +161,15 @@ impl<'a, T, V> Ext for Externalities<'a, T, V> where T: 'a + Tracer, V: 'a + VMT
 			self.engine,
 			self.vm_factory,
 			self.depth,
-			self.stack.clone(),
 		);
 
 		// TODO: handle internal error separately
-		match ex.create(params, self.substate, self.tracer, self.vm_tracer) {
-			Ok(gas_left) => {
+		match ex.create(params, self.substate, self.tracer, self.vm_tracer, stack) {
+			(Ok(gas_left), stack) => {
 				self.substate.contracts_created.push(address.clone());
-				ContractCreateResult::Created(address, gas_left)
+				(ContractCreateResult::Created(address, gas_left), stack)
 			},
-			_ => ContractCreateResult::Failed
+			(_, stack) => (ContractCreateResult::Failed, stack)
 		}
 	}
 
@@ -185,8 +181,9 @@ impl<'a, T, V> Ext for Externalities<'a, T, V> where T: 'a + Tracer, V: 'a + VMT
 		data: &[u8],
 		code_address: &Address,
 		output: &mut [u8],
-		call_type: CallType
-	) -> MessageCallResult {
+		call_type: CallType,
+		stack: Option<SharedStack>,
+	) -> (MessageCallResult, SharedStack) {
 		trace!(target: "externalities", "call");
 
 		let mut params = ActionParams {
@@ -213,12 +210,11 @@ impl<'a, T, V> Ext for Externalities<'a, T, V> where T: 'a + Tracer, V: 'a + VMT
 			self.engine,
 			self.vm_factory,
 			self.depth,
-			self.stack.clone(),
 		);
 
-		match ex.call(params, self.substate, BytesRef::Fixed(output), self.tracer, self.vm_tracer) {
-			Ok(gas_left) => MessageCallResult::Success(gas_left),
-			_ => MessageCallResult::Failed
+		match ex.call(params, self.substate, BytesRef::Fixed(output), self.tracer, self.vm_tracer, stack) {
+			(Ok(gas_left), stack) => (MessageCallResult::Success(gas_left), stack),
+			(_, stack) => (MessageCallResult::Failed, stack),
 		}
 	}
 
@@ -386,7 +382,6 @@ mod tests {
 		let state = setup.state.reference_mut();
 		let mut tracer = NoopTracer;
 		let mut vm_tracer = NoopVMTracer;
-		let shared_stack = Default::default();
 
 		let vm_factory = Default::default();
 		let ext = Externalities::new(
@@ -395,7 +390,6 @@ mod tests {
 			&*setup.engine,
 			&vm_factory,
 			0,
-			shared_stack,
 			get_test_origin(),
 			&mut setup.sub_state,
 			OutputPolicy::InitContract(None),
@@ -412,7 +406,6 @@ mod tests {
 		let state = setup.state.reference_mut();
 		let mut tracer = NoopTracer;
 		let mut vm_tracer = NoopVMTracer;
-		let shared_stack = Default::default();
 		let vm_factory = Default::default();
 
 		let ext = Externalities::new(
@@ -421,7 +414,6 @@ mod tests {
 			&*setup.engine,
 			&vm_factory,
 			0,
-			shared_stack,
 			get_test_origin(),
 			&mut setup.sub_state,
 			OutputPolicy::InitContract(None),
@@ -450,7 +442,6 @@ mod tests {
 		let state = setup.state.reference_mut();
 		let mut tracer = NoopTracer;
 		let mut vm_tracer = NoopVMTracer;
-		let shared_stack = Default::default();
 		let vm_factory = Default::default();
 
 		let ext = Externalities::new(
@@ -459,7 +450,6 @@ mod tests {
 			&*setup.engine,
 			&vm_factory,
 			0,
-			shared_stack,
 			get_test_origin(),
 			&mut setup.sub_state,
 			OutputPolicy::InitContract(None),
@@ -479,7 +469,6 @@ mod tests {
 		let state = setup.state.reference_mut();
 		let mut tracer = NoopTracer;
 		let mut vm_tracer = NoopVMTracer;
-		let shared_stack = Default::default();
 		let vm_factory = Default::default();
 
 		let mut ext = Externalities::new(
@@ -488,7 +477,6 @@ mod tests {
 			&*setup.engine,
 			&vm_factory,
 			0,
-			shared_stack,
 			get_test_origin(),
 			&mut setup.sub_state,
 			OutputPolicy::InitContract(None),
@@ -507,7 +495,8 @@ mod tests {
 			&[],
 			&Address::new(),
 			&mut output,
-			CallType::Call
+			CallType::Call,
+			None,
 		);
 	}
 
@@ -520,7 +509,6 @@ mod tests {
 		let state = setup.state.reference_mut();
 		let mut tracer = NoopTracer;
 		let mut vm_tracer = NoopVMTracer;
-		let shared_stack = Default::default();
 
 		{
 			let vm_factory = Default::default();
@@ -530,7 +518,6 @@ mod tests {
 				&*setup.engine,
 				&vm_factory,
 				0,
-				shared_stack,
 				get_test_origin(),
 				&mut setup.sub_state,
 				OutputPolicy::InitContract(None),
@@ -551,7 +538,6 @@ mod tests {
 		let state = setup.state.reference_mut();
 		let mut tracer = NoopTracer;
 		let mut vm_tracer = NoopVMTracer;
-		let shared_stack = Default::default();
 
 		{
 			let vm_factory = Default::default();
@@ -561,7 +547,6 @@ mod tests {
 				&*setup.engine,
 				&vm_factory,
 				0,
-				shared_stack,
 				get_test_origin(),
 				&mut setup.sub_state,
 				OutputPolicy::InitContract(None),

@@ -14,10 +14,6 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::ops::Deref;
-use std::rc::Rc;
-use std::cell::RefCell;
-
 use evm::instructions;
 
 /// Stack trait with VM-friendly API
@@ -40,8 +36,6 @@ pub trait Stack<T> {
 	fn peek_top(&self, no_of_elems: usize) -> &[T];
 	/// Clears the stack
 	fn clear(&mut self);
-	/// Expands the size of the stack to given value
-	fn expand(&mut self, size: usize);
 }
 
 #[derive(Default)]
@@ -51,24 +45,16 @@ pub struct VecStack<S> {
 }
 
 impl<S> Stack<S> for VecStack<S> {
-	fn expand(&mut self, size: usize) {
-		let capacity = self.stack.capacity();
-		if capacity < size {
-			self.stack.reserve(size - capacity);
-		}
-	}
 
 	fn clear(&mut self) {
 		self.stack.clear();
 	}
 
 	fn peek(&self, no_from_top: usize) -> &S {
-		assert!(self.stack.len() >= 1 + no_from_top, "peek asked for more items than exist.");
 		&self.stack[self.stack.len() - no_from_top - 1]
 	}
 
 	fn swap_with_top(&mut self, no_from_top: usize) {
-		assert!(self.stack.len() >= 1 + no_from_top, "swap_with_top asked for more items than exist.");
 		let len = self.stack.len();
 		self.stack.swap(len - no_from_top - 1, len - 1);
 	}
@@ -86,8 +72,6 @@ impl<S> Stack<S> for VecStack<S> {
 	}
 
 	fn pop_n(&mut self, no_of_elems: usize) -> &[S] {
-		assert!(no_of_elems <= instructions::MAX_NO_OF_TOPICS);
-
 		for i in 0..no_of_elems {
 			self.logs[i] = self.pop_back();
 		}
@@ -103,30 +87,9 @@ impl<S> Stack<S> for VecStack<S> {
 	}
 
 	fn peek_top(&self, no_from_top: usize) -> &[S] {
-		assert!(self.stack.len() >= no_from_top, "peek_top asked for more items than exist.");
 		&self.stack[self.stack.len() - no_from_top .. self.stack.len()]
 	}
 }
-
-#[derive(Default)]
-pub struct SharedStack<S>(Rc<RefCell<ShareableStack<S>>>);
-
-impl<S> Deref for SharedStack<S> {
-	type Target = Rc<RefCell<ShareableStack<S>>>;
-
-	fn deref(&self) -> &Self::Target {
-		&self.0
-	}
-}
-
-impl<S> Clone for SharedStack<S> {
-	fn clone(&self) -> Self {
-		SharedStack(self.0.clone())
-	}
-}
-
-unsafe impl<S> Send for SharedStack<S> {}
-unsafe impl<S> Sync for SharedStack<S> {}
 
 pub struct ShareableStack<S> {
 	stack: VecStack<S>,
@@ -159,14 +122,6 @@ impl<S> ShareableStack<S> {
 }
 
 impl<S> Stack<S> for ShareableStack<S> {
-	fn expand(&mut self, size: usize) {
-		let bottom = self.bottom();
-		let capacity = self.stack.stack.capacity();
-		if capacity + bottom < size {
-			self.stack.stack.reserve(size - capacity - bottom);
-		}
-	}
-
 	fn clear(&mut self) {
 		let bottom = self.bottom();
 		self.stack.stack.truncate(bottom);

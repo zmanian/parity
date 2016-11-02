@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use util::{U256, H256, Address, Bytes, FixedHash};
 use ethcore::client::EnvInfo;
-use ethcore::evm::{self, Ext, ContractCreateResult, MessageCallResult, Schedule, CallType};
+use ethcore::evm::{self, Ext, ContractCreateResult, MessageCallResult, Schedule, CallType, SharedStack};
 
 pub struct FakeExt {
 	schedule: Schedule,
@@ -59,19 +59,21 @@ impl Ext for FakeExt {
 		unimplemented!();
 	}
 
-	fn create(&mut self, _gas: &U256, _value: &U256, _code: &[u8]) -> ContractCreateResult {
+	fn create(&mut self, _gas: &U256, _value: &U256, _code: &[u8], _stack: Option<SharedStack>) -> (ContractCreateResult, SharedStack) {
 		unimplemented!();
 	}
 
 	fn call(&mut self,
-			_gas: &U256,
-			_sender_address: &Address,
-			_receive_address: &Address,
-			_value: Option<U256>,
-			_data: &[u8],
-			_code_address: &Address,
-			_output: &mut [u8],
-			_call_type: CallType) -> MessageCallResult {
+		_gas: &U256,
+		_sender_address: &Address,
+		_receive_address: &Address,
+		_value: Option<U256>,
+		_data: &[u8],
+		_code_address: &Address,
+		_output: &mut [u8],
+		_call_type: CallType,
+		_stack: Option<SharedStack>,
+	) -> (MessageCallResult, SharedStack) {
 		unimplemented!();
 	}
 

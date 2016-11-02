@@ -72,10 +72,10 @@ fn main() {
 pub fn run_vm(params: ActionParams) -> Result<Success, Failure> {
 	let initial_gas = params.gas;
 	let factory = Factory::new(VMType::Interpreter, 1024);
-	let mut vm = factory.create(params.gas, Default::default());
+	let mut vm = factory.create(params.gas);
 
 	let start = Instant::now();
-	let gas_left = vm.exec(params, ext::FakeExt::default());
+	let gas_left = vm.exec(params, ext::FakeExt::default(), None).0;
 	let duration = start.elapsed();
 
 	match gas_left {

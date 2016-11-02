@@ -17,7 +17,7 @@
 //! Interface for Evm externalities.
 
 use util::*;
-use evm::{self, Schedule, CostType};
+use evm::{self, Schedule, CostType, SharedStack};
 use env_info::*;
 use types::executed::CallType;
 
@@ -61,7 +61,13 @@ pub trait Ext {
 	/// Creates new contract.
 	///
 	/// Returns gas_left and contract address if contract creation was succesfull.
-	fn create(&mut self, gas: &U256, value: &U256, code: &[u8]) -> ContractCreateResult;
+	fn create(
+		&mut self,
+		gas: &U256,
+		value: &U256,
+		code: &[u8],
+		stack: Option<SharedStack>
+	) -> (ContractCreateResult, SharedStack);
 
 	/// Message call.
 	///
@@ -77,8 +83,9 @@ pub trait Ext {
 		data: &[u8],
 		code_address: &Address,
 		output: &mut [u8],
-		call_type: CallType
-	) -> MessageCallResult;
+		call_type: CallType,
+		stack: Option<SharedStack>,
+	) -> (MessageCallResult, SharedStack);
 
 	/// Returns code at given address
 	fn extcode(&self, address: &Address) -> Arc<Bytes>;
