@@ -45,6 +45,7 @@ use block::*;
 use transaction::{LocalizedTransaction, SignedTransaction, Action};
 use blockchain::extras::TransactionAddress;
 use types::filter::Filter;
+use types::mode::Mode as IpcMode;
 use log_entry::LocalizedLogEntry;
 use verification::queue::BlockQueue;
 use blockchain::{BlockChain, BlockProvider, TreeRoute, ImportRoute};
@@ -60,12 +61,13 @@ use receipt::LocalizedReceipt;
 use trace::{TraceDB, ImportRequest as TraceImportRequest, LocalizedTrace, Database as TraceDatabase};
 use trace;
 use trace::FlatTransactionTraces;
-use evm::Factory as EvmFactory;
+use evm::{Factory as EvmFactory, Schedule};
 use miner::{Miner, MinerService};
 use snapshot::{self, io as snapshot_io};
 use factory::Factories;
 use rlp::{View, UntrustedRlp};
 use state_db::StateDB;
+use rand::OsRng;
 
 // re-export
 pub use types::blockchain_info::BlockChainInfo;
@@ -122,7 +124,7 @@ impl SleepState {
 /// Blockchain database client backed by a persistent database. Owns and manages a blockchain and a block queue.
 /// Call `import_block()` to import a block asynchronously; `flush_queue()` flushes the queue.
 pub struct Client {
-	mode: Mode,
+	mode: Mutex<Mode>,
 	chain: RwLock<Arc<BlockChain>>,
 	tracedb: RwLock<TraceDB<BlockChain>>,
 	engine: Arc<Engine>,
@@ -138,12 +140,13 @@ pub struct Client {
 	miner: Arc<Miner>,
 	sleep_state: Mutex<SleepState>,
 	liveness: AtomicBool,
-	io_channel: IoChannel<ClientIoMessage>,
+	io_channel: Mutex<IoChannel<ClientIoMessage>>,
 	notify: RwLock<Vec<Weak<ChainNotify>>>,
 	queue_transactions: AtomicUsize,
 	last_hashes: RwLock<VecDeque<H256>>,
 	factories: Factories,
 	history: u64,
+	rng: Mutex<OsRng>,
 }
 
 impl Client {
@@ -226,7 +229,7 @@ impl Client {
 		let client = Client {
 			sleep_state: Mutex::new(SleepState::new(awake)),
 			liveness: AtomicBool::new(awake),
-			mode: config.mode.clone(),
+			mode: Mutex::new(config.mode.clone()),
 			chain: RwLock::new(chain),
 			tracedb: tracedb,
 			engine: engine,
@@ -240,12 +243,13 @@ impl Client {
 			import_lock: Mutex::new(()),
 			panic_handler: panic_handler,
 			miner: miner,
-			io_channel: message_channel,
+			io_channel: Mutex::new(message_channel),
 			notify: RwLock::new(Vec::new()),
 			queue_transactions: AtomicUsize::new(0),
 			last_hashes: RwLock::new(VecDeque::new()),
 			factories: factories,
 			history: history,
+			rng: Mutex::new(try!(OsRng::new().map_err(::util::UtilError::StdIo))),
 		};
 		Ok(Arc::new(client))
 	}
@@ -441,13 +445,25 @@ impl Client {
 	/// Import a block with transaction receipts.
 	/// The block is guaranteed to be the next best blocks in the first block sequence.
 	/// Does no sealing or transaction validation.
-	fn import_old_block(&self, block_bytes: Bytes, receipts_bytes: Bytes) -> H256 {
+	fn import_old_block(&self, block_bytes: Bytes, receipts_bytes: Bytes) -> Result<H256, ::error::Error> {
 		let block = BlockView::new(&block_bytes);
-		let hash = block.header().hash();
+		let header = block.header();
+		let hash = header.hash();
 		let _import_lock = self.import_lock.lock();
 		{
 			let _timer = PerfTimer::new("import_old_block");
+			let mut rng = self.rng.lock();
 			let chain = self.chain.read();
+
+			// verify block.
+			try!(::snapshot::verify_old_block(
+				&mut *rng,
+				&header,
+				&*self.engine,
+				&*chain,
+				Some(&block_bytes),
+				false,
+			));
 
 			// Commit results
 			let receipts = ::rlp::decode(&receipts_bytes);
@@ -458,7 +474,7 @@ impl Client {
 			chain.commit();
 		}
 		self.db.read().flush().expect("DB flush failed.");
-		hash
+		Ok(hash)
 	}
 
 	fn commit_block<B>(&self, block: B, hash: &H256, block_data: &[u8]) -> ImportRoute where B: IsBlock + Drain {
@@ -606,7 +622,8 @@ impl Client {
 		self.block_queue.collect_garbage();
 		self.tracedb.read().collect_garbage();
 
-		match self.mode {
+		let mode = self.mode.lock().clone();
+		match mode {
 			Mode::Dark(timeout) => {
 				let mut ss = self.sleep_state.lock();
 				if let Some(t) = ss.last_activity {
@@ -762,7 +779,7 @@ impl BlockChainClient for Client {
 	fn call(&self, t: &SignedTransaction, block: BlockID, analytics: CallAnalytics) -> Result<Executed, CallError> {
 		let header = try!(self.block_header(block).ok_or(CallError::StatePruned));
 		let view = HeaderView::new(&header);
-		let last_hashes = self.build_last_hashes(view.hash());
+		let last_hashes = self.build_last_hashes(view.parent_hash());
 		let env_info = EnvInfo {
 			number: view.number(),
 			author: view.author(),
@@ -834,9 +851,21 @@ impl BlockChainClient for Client {
 	}
 
 	fn keep_alive(&self) {
-		if self.mode != Mode::Active {
+		let mode = self.mode.lock().clone();
+		if mode != Mode::Active {
 			self.wake_up();
 			(*self.sleep_state.lock()).last_activity = Some(Instant::now());
+		}
+	}
+
+	fn mode(&self) -> IpcMode { self.mode.lock().clone().into() }
+
+	fn set_mode(&self, mode: IpcMode) {
+		*self.mode.lock() = mode.clone().into();
+		match mode {
+			IpcMode::Active => self.wake_up(),
+			IpcMode::Off => self.sleep(),
+			_ => {(*self.sleep_state.lock()).last_activity = Some(Instant::now()); }
 		}
 	}
 
@@ -1047,7 +1076,7 @@ impl BlockChainClient for Client {
 				return Err(BlockImportError::Block(BlockError::UnknownParent(header.parent_hash())));
 			}
 		}
-		Ok(self.import_old_block(block_bytes, receipts_bytes))
+		self.import_old_block(block_bytes, receipts_bytes).map_err(Into::into)
 	}
 
 	fn queue_info(&self) -> BlockQueueInfo {
@@ -1135,7 +1164,7 @@ impl BlockChainClient for Client {
 			debug!("Ignoring {} transactions: queue is full", transactions.len());
 		} else {
 			let len = transactions.len();
-			match self.io_channel.send(ClientIoMessage::NewTransactions(transactions)) {
+			match self.io_channel.lock().send(ClientIoMessage::NewTransactions(transactions)) {
 				Ok(_) => {
 					self.queue_transactions.fetch_add(len, AtomicOrdering::SeqCst);
 				}
@@ -1152,6 +1181,23 @@ impl BlockChainClient for Client {
 }
 
 impl MiningBlockChainClient for Client {
+
+	fn latest_schedule(&self) -> Schedule {
+		let header_data = self.best_block_header();
+		let view = HeaderView::new(&header_data);
+
+		let env_info = EnvInfo {
+			number: view.number(),
+			author: view.author(),
+			timestamp: view.timestamp(),
+			difficulty: view.difficulty(),
+			last_hashes: self.build_last_hashes(view.hash()),
+			gas_used: U256::default(),
+			gas_limit: view.gas_limit(),
+		};
+		self.engine.schedule(&env_info)
+	}
+
 	fn prepare_open_block(&self, author: Address, gas_range_target: (U256, U256), extra_data: Bytes) -> OpenBlock {
 		let engine = &*self.engine;
 		let chain = self.chain.read();

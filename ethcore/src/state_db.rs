@@ -16,6 +16,7 @@
 
 use std::collections::{VecDeque, HashSet};
 use lru_cache::LruCache;
+use util::cache::MemoryLruCache;
 use util::journaldb::JournalDB;
 use util::hash::{H256};
 use util::hashdb::HashDB;
@@ -32,6 +33,9 @@ pub const DEFAULT_ACCOUNT_PRESET: usize = 1000000;
 pub const ACCOUNT_BLOOM_HASHCOUNT_KEY: &'static [u8] = b"account_hash_count";
 
 const STATE_CACHE_BLOCKS: usize = 12;
+
+// The percentage of supplied cache size to go to accounts.
+const ACCOUNT_CACHE_RATIO: usize = 90;
 
 /// Shared canonical state cache.
 struct AccountCache {
@@ -91,6 +95,8 @@ pub struct StateDB {
 	meta_db: MetaDB,
 	/// Shared canonical state cache.
 	account_cache: Arc<Mutex<AccountCache>>,
+	/// DB Code cache. Maps code hashes to shared bytes.
+	code_cache: Arc<Mutex<MemoryLruCache<H256, Arc<Vec<u8>>>>>,
 	/// Local dirty cache.
 	local_cache: Vec<CacheQueueItem>,
 	/// Shared account bloom. Does not handle chain reorganizations.
@@ -114,7 +120,9 @@ impl StateDB {
 	// into the `AccountCache` structure as its own `LruCache<(Address, H256), H256>`.
 	pub fn new(db: Box<JournalDB>, meta_db: MetaDB, cache_size: usize) -> StateDB {
 		let bloom = Self::load_bloom(db.backing());
-		let cache_items = cache_size / ::std::mem::size_of::<Option<Account>>();
+		let acc_cache_size = cache_size * ACCOUNT_CACHE_RATIO / 100;
+		let code_cache_size = cache_size - acc_cache_size;
+		let cache_items = acc_cache_size / ::std::mem::size_of::<Option<Account>>();
 
 		StateDB {
 			db: db,
@@ -123,6 +131,7 @@ impl StateDB {
 				accounts: LruCache::new(cache_items),
 				modifications: VecDeque::new(),
 			})),
+			code_cache: Arc::new(Mutex::new(MemoryLruCache::new(code_cache_size))),
 			local_cache: Vec::new(),
 			account_bloom: Arc::new(Mutex::new(bloom)),
 			cache_size: cache_size,
@@ -345,6 +354,7 @@ impl StateDB {
 			db: self.db.boxed_clone(),
 			meta_db: self.meta_db.clone(),
 			account_cache: self.account_cache.clone(),
+			code_cache: self.code_cache.clone(),
 			local_cache: Vec::new(),
 			account_bloom: self.account_bloom.clone(),
 			cache_size: self.cache_size,
@@ -361,6 +371,7 @@ impl StateDB {
 			db: self.db.boxed_clone(),
 			meta_db: self.meta_db.clone(),
 			account_cache: self.account_cache.clone(),
+			code_cache: self.code_cache.clone(),
 			local_cache: Vec::new(),
 			account_bloom: self.account_bloom.clone(),
 			cache_size: self.cache_size,
@@ -381,9 +392,13 @@ impl StateDB {
 		use util::HeapSizeOf;
 
 		// TODO: account for LRU-cache overhead; this is a close approximation.
-		self.db.mem_used()
-			+ self.meta_db.heap_size_of_children()
-			+ self.account_cache.lock().accounts.len() * ::std::mem::size_of::<Option<Account>>()
+		self.db.mem_used() +
+		self.meta_db.heap_size_of_children() +
+		{
+			let accounts = self.account_cache.lock().accounts.len();
+			let code_size = self.code_cache.lock().current_size();
+			code_size + accounts * ::std::mem::size_of::<Option<Account>>()
+		}
 	}
 
 	/// Returns underlying `JournalDB`.
@@ -403,6 +418,15 @@ impl StateDB {
 		})
 	}
 
+	/// Add a global code cache entry. This doesn't need to worry about canonicality because
+	/// it simply maps hashes to raw code and will always be correct in the absence of
+	/// hash collisions.
+	pub fn cache_code(&self, hash: H256, code: Arc<Vec<u8>>) {
+		let mut cache = self.code_cache.lock();
+
+		cache.insert(hash, code);
+	}
+
 	/// Get basic copy of the cached account. Does not include storage.
 	/// Returns 'None' if cache is disabled or if the account is not cached.
 	pub fn get_cached_account(&self, addr: &Address) -> Option<Option<Account>> {
@@ -416,6 +440,13 @@ impl StateDB {
 			Some(acc) => Some(acc),
 			None => self.get_from_meta(addr).map(|c| c.map(Account::from_meta)),
 		}
+	}
+
+	/// Get cached code based on hash.
+	pub fn get_cached_code(&self, hash: &H256) -> Option<Arc<Vec<u8>>> {
+		let mut cache = self.code_cache.lock();
+
+		cache.get_mut(hash).map(|code| code.clone())
 	}
 
 	/// Get value from a cached account.
