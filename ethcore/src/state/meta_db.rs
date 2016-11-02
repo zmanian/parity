@@ -301,8 +301,6 @@ impl MetaDB {
 	/// Mark a candidate for an era as canonical, applying its changes
 	/// and invalidating its siblings.
 	pub fn mark_canonical(&mut self, batch: &mut DBTransaction, end_era: u64, canon_id: H256) {
-
-
 		trace!(target: "meta_db", "mark_canonical: ({}, {})", end_era, canon_id);
 		let mut journal = self.journal.write();
 
@@ -435,7 +433,7 @@ mod tests {
 	use super::{AccountMeta, MetaDB};
 	use devtools::RandomTempPath;
 
-	use util::{U256, H256};
+	use util::{Address, U256, H256, FixedHash};
 	use util::kvdb::Database;
 
 	use std::sync::Arc;
@@ -463,5 +461,71 @@ mod tests {
 		let meta_db = MetaDB::new(db.clone(), None, &Default::default()).unwrap();
 
 		assert_eq!(&*journal.read(), &*meta_db.journal.read());
+	}
+
+	#[test]
+	fn query_fork() {
+		let path = RandomTempPath::create_dir();
+		let db = Arc::new(Database::open_default(&*path.as_path().to_string_lossy()).unwrap());
+		let mut meta_db = MetaDB::new(db.clone(), None, &H256::zero()).unwrap();
+
+		let h1 = H256::random();
+		let h2a = H256::random();
+		let h2b = H256::random();
+		let h3a = H256::random();
+		let h3b = H256::random();
+
+		let mut new_meta = AccountMeta::default();
+		new_meta.balance = new_meta.balance + 5u64.into();
+
+		let addr = Address::random();
+		meta_db.set(addr.clone(), AccountMeta::default());
+
+		let mut batch = db.transaction();
+		meta_db.journal_under(&mut batch, 1, h1, H256::zero());
+		db.write(batch).unwrap();
+
+		// fork side 1 -- deleted in first block.
+		{
+			meta_db.remove(addr.clone());
+
+			let mut batch = db.transaction();
+			meta_db.journal_under(&mut batch, 2, h2a, h1);
+			db.write(batch).unwrap();
+
+			let mut batch = db.transaction();
+			meta_db.journal_under(&mut batch, 3, h3a, h2a);
+			db.write(batch).unwrap();
+		}
+
+
+		// fork side 2: changes in second block.
+		{
+			let mut batch = db.transaction();
+			meta_db.journal_under(&mut batch, 2, h2b, h1);
+			db.write(batch).unwrap();
+
+			meta_db.set(addr.clone(), new_meta.clone());
+
+			let mut batch = db.transaction();
+			meta_db.journal_under(&mut batch, 3, h3b, h2b);
+			db.write(batch).unwrap();
+		}
+
+		assert_eq!(meta_db.get(&addr, (1, h1)).unwrap(), Some(AccountMeta::default()));
+		assert_eq!(meta_db.get(&addr, (2, h2a)).unwrap(), None);
+		assert_eq!(meta_db.get(&addr, (2, h2b)).unwrap(), Some(AccountMeta::default()));
+		assert_eq!(meta_db.get(&addr, (3, h3a)).unwrap(), None);
+		assert_eq!(meta_db.get(&addr, (3, h3b)).unwrap(), Some(new_meta.clone()));
+
+		let mut batch = db.transaction();
+		meta_db.mark_canonical(&mut batch, 1, h1);
+		db.write(batch).unwrap();
+
+		assert_eq!(meta_db.get(&addr, (1, h1)).unwrap(), Some(AccountMeta::default()));
+		assert_eq!(meta_db.get(&addr, (2, h2a)).unwrap(), None);
+		assert_eq!(meta_db.get(&addr, (2, h2b)).unwrap(), Some(AccountMeta::default()));
+		assert_eq!(meta_db.get(&addr, (3, h3a)).unwrap(), None);
+		assert_eq!(meta_db.get(&addr, (3, h3b)).unwrap(), Some(new_meta.clone()));
 	}
 }
