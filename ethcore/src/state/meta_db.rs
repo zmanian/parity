@@ -28,7 +28,7 @@
 //!
 //! For each hash, we store a list of changes in that candidate.
 
-use util::{Address, H256, U256, RwLock};
+use util::{Address, HeapSizeOf, H256, U256, RwLock};
 use util::kvdb::{Database, DBTransaction};
 use rlp::{Decoder, DecoderError, RlpDecodable, RlpEncodable, RlpStream, Stream, Rlp, View};
 
@@ -77,6 +77,8 @@ pub struct AccountMeta {
 	pub nonce: U256,
 }
 
+known_heap_size!(0, AccountMeta);
+
 impl RlpEncodable for AccountMeta {
 	fn rlp_append(&self, s: &mut RlpStream) {
 		s.begin_list(5)
@@ -109,6 +111,12 @@ struct JournalEntry {
 	parent: H256,
 	// every entry which was set for this era.
 	entries: HashMap<Address, Option<AccountMeta>>,
+}
+
+impl HeapSizeOf for JournalEntry {
+	fn heap_size_of_children(&self) -> usize {
+		self.entries.heap_size_of_children()
+	}
 }
 
 impl RlpEncodable for JournalEntry {
@@ -222,6 +230,14 @@ impl Journal {
 	}
 }
 
+impl HeapSizeOf for Journal {
+	fn heap_size_of_children(&self) -> usize {
+		self.entries.heap_size_of_children()
+			// + self.modifications.heap_size_of_children()
+			// ^~~ uncomment when BTreeSet has a HeapSizeOf implementation.
+	}
+}
+
 /// The account meta-database. See the module docs for more details.
 /// It can't be queried without a `MetaBranch` which allows for accurate
 /// queries along the current branch.
@@ -285,6 +301,8 @@ impl MetaDB {
 	/// Mark a candidate for an era as canonical, applying its changes
 	/// and invalidating its siblings.
 	pub fn mark_canonical(&mut self, batch: &mut DBTransaction, end_era: u64, canon_id: H256) {
+
+
 		trace!(target: "meta_db", "mark_canonical: ({}, {})", end_era, canon_id);
 		let mut journal = self.journal.write();
 
@@ -300,8 +318,16 @@ impl MetaDB {
 
 			// remove modifications entries.
 			for addr in entry.entries.keys() {
-				if let Some(ref mut modifications) = journal.modifications.get_mut(addr) {
-					modifications.remove(&(end_era, id));
+				let remove = match journal.modifications.get_mut(addr) {
+					Some(ref mut mods) => {
+						mods.remove(&(end_era, id));
+						mods.is_empty()
+					}
+					None => false,
+				};
+
+				if remove {
+					journal.modifications.remove(addr);
 				}
 			}
 
@@ -395,6 +421,12 @@ impl MetaDB {
 	pub fn remove(&mut self, address: Address) {
 		trace!(target: "meta_db", "remove({:?})", address);
 		self.overlay.insert(address, None);
+	}
+}
+
+impl HeapSizeOf for MetaDB {
+	fn heap_size_of_children(&self) -> usize {
+		self.overlay.heap_size_of_children() + self.journal.read().heap_size_of_children()
 	}
 }
 
