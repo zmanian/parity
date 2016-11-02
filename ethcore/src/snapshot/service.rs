@@ -99,6 +99,9 @@ impl Restoration {
 		let raw_db = Arc::new(try!(Database::open(params.db_config, &*params.db_path.to_string_lossy())
 			.map_err(UtilError::SimpleString)));
 
+		let state = try!(StateRebuilder::new(raw_db.clone(), params.pruning, &manifest)
+			.map_err(::util::UtilError::SimpleString));
+
 		let chain = BlockChain::new(Default::default(), params.genesis, raw_db.clone());
 		let blocks = try!(BlockRebuilder::new(chain, raw_db.clone(), &manifest));
 
@@ -107,7 +110,7 @@ impl Restoration {
 			manifest: manifest,
 			state_chunks_left: state_chunks,
 			block_chunks_left: block_chunks,
-			state: StateRebuilder::new(raw_db.clone(), params.pruning),
+			state: state,
 			blocks: blocks,
 			writer: params.writer,
 			snappy_buffer: Vec::new(),
@@ -166,7 +169,7 @@ impl Restoration {
 		}
 
 		// check for missing code.
-		try!(self.state.check_missing());
+		try!(self.state.finalize());
 
 		// connect out-of-order chunks and verify chain integrity.
 		try!(self.blocks.finalize(self.canonical_hashes));
@@ -176,7 +179,9 @@ impl Restoration {
 		}
 
 		self.guard.disarm();
+		try!(self.db.flush().map_err(::util::UtilError::SimpleString));
 		Ok(())
+
 	}
 
 	// is everything done?
@@ -504,8 +509,6 @@ impl Service {
 
 							match is_done {
 								true => {
-									try!(db.flush().map_err(::util::UtilError::SimpleString));
-									drop(db);
 									return self.finalize_restoration(&mut *restoration);
 								},
 								false => Ok(())

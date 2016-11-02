@@ -43,6 +43,8 @@ pub enum Error {
 	OldBlockPrunedDB,
 	/// Missing code.
 	MissingCode(Vec<H256>),
+	/// Missing meta db entry for given account denoted by hash.
+	MissingMeta(H256),
 	/// Unrecognized code encoding.
 	UnrecognizedCodeState(u8),
 	/// Trie error.
@@ -66,6 +68,7 @@ impl fmt::Display for Error {
 			Error::OldBlockPrunedDB => write!(f, "Attempted to create a snapshot at an old block while using \
 				a pruned database. Please re-run with the --pruning archive flag."),
 			Error::MissingCode(ref missing) => write!(f, "Incomplete snapshot: {} contract codes not found.", missing.len()),
+			Error::MissingMeta(ref missing) => write!(f, "Internal Error: Missing meta entry for account: {}", missing),
 			Error::UnrecognizedCodeState(state) => write!(f, "Unrecognized code encoding ({})", state),
 			Error::Io(ref err) => err.fmt(f),
 			Error::Decoder(ref err) => err.fmt(f),

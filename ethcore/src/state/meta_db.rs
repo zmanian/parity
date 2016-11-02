@@ -28,7 +28,7 @@
 //!
 //! For each hash, we store a list of changes in that candidate.
 
-use util::{Address, HeapSizeOf, H256, U256, RwLock};
+use util::{HeapSizeOf, H256, U256, RwLock};
 use util::kvdb::{Database, DBTransaction};
 use rlp::{Decoder, DecoderError, RlpDecodable, RlpEncodable, RlpStream, Stream, Rlp, View};
 
@@ -110,7 +110,7 @@ impl RlpDecodable for AccountMeta {
 struct JournalEntry {
 	parent: H256,
 	// every entry which was set for this era.
-	entries: HashMap<Address, Option<AccountMeta>>,
+	entries: HashMap<H256, Option<AccountMeta>>,
 }
 
 impl HeapSizeOf for JournalEntry {
@@ -125,8 +125,8 @@ impl RlpEncodable for JournalEntry {
 		s.append(&self.parent);
 
 		s.begin_list(self.entries.len());
-		for (addr, delta) in self.entries.iter() {
-			s.begin_list(2).append(addr);
+		for (acc, delta) in self.entries.iter() {
+			s.begin_list(2).append(acc);
 			s.begin_list(2);
 
 			match *delta {
@@ -147,7 +147,7 @@ impl RlpDecodable for JournalEntry {
 		let mut entries = HashMap::new();
 
 		for entry in try!(rlp.at(1)).iter() {
-			let addr = try!(entry.val_at(0));
+			let acc = try!(entry.val_at(0));
 			let maybe = try!(entry.at(1));
 
 			let delta = match try!(maybe.val_at(0)) {
@@ -155,7 +155,7 @@ impl RlpDecodable for JournalEntry {
 				false => None,
 			};
 
-			entries.insert(addr, delta);
+			entries.insert(acc, delta);
 		}
 
 		Ok(JournalEntry {
@@ -176,8 +176,8 @@ impl RlpDecodable for JournalEntry {
 struct Journal {
 	// maps era, id pairs to potential canonical meta info.
 	entries: BTreeMap<(u64, H256), JournalEntry>,
-	// maps addresses to sets of blocks they were modified at.
-	modifications: HashMap<Address, BTreeSet<(u64, H256)>>,
+	// maps address hashes to sets of blocks they were modified at.
+	modifications: HashMap<H256, BTreeSet<(u64, H256)>>,
 	canon_base: (u64, H256), // the base which the journal builds off of.
 }
 
@@ -201,8 +201,8 @@ impl Journal {
 
 				let entry: JournalEntry = ::rlp::decode(&journal_rlp);
 
-				for addr in entry.entries.keys() {
-					journal.modifications.entry(*addr).or_insert_with(BTreeSet::new).insert((era, hash));
+				for acc in entry.entries.keys() {
+					journal.modifications.entry(*acc).or_insert_with(BTreeSet::new).insert((era, hash));
 				}
 
 				Ok(((era, hash), entry))
@@ -249,7 +249,7 @@ pub struct MetaDB {
 	col: Option<u32>,
 	db: Arc<Database>,
 	journal: Arc<RwLock<Journal>>,
-	overlay: HashMap<Address, Option<AccountMeta>>,
+	overlay: HashMap<H256, Option<AccountMeta>>,
 }
 
 impl MetaDB {
@@ -284,8 +284,8 @@ impl MetaDB {
 			entries: ::std::mem::replace(&mut self.overlay, HashMap::new()),
 		};
 
-		for addr in j_entry.entries.keys() {
-			journal.modifications.entry(*addr).or_insert_with(BTreeSet::new).insert((now, id));
+		for acc in j_entry.entries.keys() {
+			journal.modifications.entry(*acc).or_insert_with(BTreeSet::new).insert((now, id));
 		}
 
 		let encoded = ::rlp::encode(&j_entry);
@@ -315,8 +315,8 @@ impl MetaDB {
 			batch.delete(self.col, &id_key(&id));
 
 			// remove modifications entries.
-			for addr in entry.entries.keys() {
-				let remove = match journal.modifications.get_mut(addr) {
+			for acc in entry.entries.keys() {
+				let remove = match journal.modifications.get_mut(acc) {
 					Some(ref mut mods) => {
 						mods.remove(&(end_era, id));
 						mods.is_empty()
@@ -325,16 +325,16 @@ impl MetaDB {
 				};
 
 				if remove {
-					journal.modifications.remove(addr);
+					journal.modifications.remove(acc);
 				}
 			}
 
 			// apply canonical changes.
 			if id == canon_id {
-				for (addr, delta) in entry.entries {
+				for (acc, delta) in entry.entries {
 					match delta {
-						Some(delta) => batch.put(self.col, &addr, &*::rlp::encode(&delta)),
-						None => batch.delete(self.col, &addr),
+						Some(delta) => batch.put(self.col, &acc, &*::rlp::encode(&delta)),
+						None => batch.delete(self.col, &acc),
 					}
 				}
 			}
@@ -350,20 +350,44 @@ impl MetaDB {
 		batch.delete(self.col, &journal_key(&end_era));
 	}
 
+	/// Inject the contents of the overlay directly into the backing database,
+	/// signifying that they are known to be canonical.
+	/// Used in snapshot restoration.
+	pub fn inject(&mut self, batch: &mut DBTransaction) {
+		for (acc, delta) in self.overlay.drain() {
+			match delta {
+				Some(delta) => batch.put(self.col, &acc, &*::rlp::encode(&delta)),
+				None => batch.delete(self.col, &acc),
+			}
+		}
+	}
+
+	/// Manually update the canonical base.
+	/// Should only be done when there is a solid guarantee that
+	/// the data in the backing database does, in fact, correspond with
+	/// the given canonical base.
+	pub fn update_base(&mut self, batch: &mut DBTransaction, era: u64, id: H256) {
+		let mut base_stream = RlpStream::new_list(2);
+		base_stream.append(&era).append(&id);
+		batch.put(self.col, b"base", &*base_stream.drain());
+
+		self.journal.write().canon_base = (era, id);
+	}
+
 	/// Query the state of an account at a given block. A return value
 	/// of `None` means that the account definitively does not exist on this branch.
 	/// This will query the overlay of pending changes first.
 	///
 	/// Will fail on database error, state pruned, or unexpected missing journal entry.
-	pub fn get(&self, address: &Address, at: (u64, H256)) -> Result<Option<AccountMeta>, Error> {
-		trace!(target: "meta_db", "get: {:?} at {:?}", address, at);
+	pub fn get(&self, address_hash: &H256, at: (u64, H256)) -> Result<Option<AccountMeta>, Error> {
+		trace!(target: "meta_db", "get: {:?} at {:?}", address_hash, at);
 
-		let get_from_db = || match self.db.get(self.col, &*address) {
+		let get_from_db = || match self.db.get(self.col, &*address_hash) {
 			Ok(meta) => Ok(meta.map(|x| ::rlp::decode(&x))),
 			Err(e) => Err(Error::Database(e)),
 		};
 
-		if let Some(meta) = self.overlay.get(address) {
+		if let Some(meta) = self.overlay.get(address_hash) {
 			return Ok(meta.clone());
 		}
 
@@ -378,7 +402,7 @@ impl MetaDB {
 		let mut entry = try!(journal.entries.get(&(era, id)).ok_or_else(|| Error::MissingJournalEntry(era, id)));
 
 		// iterate the modifications for this account in reverse order (by id),
-		for &(mod_era, ref mod_id) in journal.modifications.get(address).into_iter().flat_map(|m| m.iter().rev()) {
+		for &(mod_era, ref mod_id) in journal.modifications.get(address_hash).into_iter().flat_map(|m| m.iter().rev()) {
 			if era <= journal.canon_base.0 { break }
 
 			// walk the relevant path down the journal backwards until we're aligned with
@@ -393,7 +417,7 @@ impl MetaDB {
 			if mod_id != &id { continue }
 
 			assert_eq!((era, &id), (mod_era, mod_id), "journal traversal led to wrong entry");
-			return Ok(entry.entries.get(address)
+			return Ok(entry.entries.get(address_hash)
 				.expect("modifications set always contains correct entries; qed")
 				.clone());
 		}
@@ -406,19 +430,19 @@ impl MetaDB {
 		get_from_db()
 	}
 
-	/// Set the given account's details on this address in the pending changes
+	/// Set the given account's details in the pending changes
 	/// overlay.
 	/// This will overwrite any previous changes to the overlay,
 	/// and will be queried prior to the journal.
-	pub fn set(&mut self, address: Address, meta: AccountMeta) {
-		trace!(target: "meta_db", "set({:?}, {:?})", address, meta);
-		self.overlay.insert(address, Some(meta));
+	pub fn set(&mut self, address_hash: H256, meta: AccountMeta) {
+		trace!(target: "meta_db", "set({:?}, {:?})", address_hash, meta);
+		self.overlay.insert(address_hash, Some(meta));
 	}
 
 	/// Destroy the account details here.
-	pub fn remove(&mut self, address: Address) {
-		trace!(target: "meta_db", "remove({:?})", address);
-		self.overlay.insert(address, None);
+	pub fn remove(&mut self, address_hash: H256) {
+		trace!(target: "meta_db", "remove({:?})", address_hash);
+		self.overlay.insert(address_hash, None);
 	}
 }
 
@@ -433,7 +457,7 @@ mod tests {
 	use super::{AccountMeta, MetaDB};
 	use devtools::RandomTempPath;
 
-	use util::{Address, U256, H256, FixedHash};
+	use util::{U256, H256, FixedHash};
 	use util::kvdb::Database;
 
 	use std::sync::Arc;
@@ -478,8 +502,8 @@ mod tests {
 		let mut new_meta = AccountMeta::default();
 		new_meta.balance = new_meta.balance + 5u64.into();
 
-		let addr = Address::random();
-		meta_db.set(addr.clone(), AccountMeta::default());
+		let acc = H256::random();
+		meta_db.set(acc.clone(), AccountMeta::default());
 
 		let mut batch = db.transaction();
 		meta_db.journal_under(&mut batch, 1, h1, H256::zero());
@@ -487,7 +511,7 @@ mod tests {
 
 		// fork side 1 -- deleted in first block.
 		{
-			meta_db.remove(addr.clone());
+			meta_db.remove(acc.clone());
 
 			let mut batch = db.transaction();
 			meta_db.journal_under(&mut batch, 2, h2a, h1);
@@ -505,27 +529,27 @@ mod tests {
 			meta_db.journal_under(&mut batch, 2, h2b, h1);
 			db.write(batch).unwrap();
 
-			meta_db.set(addr.clone(), new_meta.clone());
+			meta_db.set(acc.clone(), new_meta.clone());
 
 			let mut batch = db.transaction();
 			meta_db.journal_under(&mut batch, 3, h3b, h2b);
 			db.write(batch).unwrap();
 		}
 
-		assert_eq!(meta_db.get(&addr, (1, h1)).unwrap(), Some(AccountMeta::default()));
-		assert_eq!(meta_db.get(&addr, (2, h2a)).unwrap(), None);
-		assert_eq!(meta_db.get(&addr, (2, h2b)).unwrap(), Some(AccountMeta::default()));
-		assert_eq!(meta_db.get(&addr, (3, h3a)).unwrap(), None);
-		assert_eq!(meta_db.get(&addr, (3, h3b)).unwrap(), Some(new_meta.clone()));
+		assert_eq!(meta_db.get(&acc, (1, h1)).unwrap(), Some(AccountMeta::default()));
+		assert_eq!(meta_db.get(&acc, (2, h2a)).unwrap(), None);
+		assert_eq!(meta_db.get(&acc, (2, h2b)).unwrap(), Some(AccountMeta::default()));
+		assert_eq!(meta_db.get(&acc, (3, h3a)).unwrap(), None);
+		assert_eq!(meta_db.get(&acc, (3, h3b)).unwrap(), Some(new_meta.clone()));
 
 		let mut batch = db.transaction();
 		meta_db.mark_canonical(&mut batch, 1, h1);
 		db.write(batch).unwrap();
 
-		assert_eq!(meta_db.get(&addr, (1, h1)).unwrap(), Some(AccountMeta::default()));
-		assert_eq!(meta_db.get(&addr, (2, h2a)).unwrap(), None);
-		assert_eq!(meta_db.get(&addr, (2, h2b)).unwrap(), Some(AccountMeta::default()));
-		assert_eq!(meta_db.get(&addr, (3, h3a)).unwrap(), None);
-		assert_eq!(meta_db.get(&addr, (3, h3b)).unwrap(), Some(new_meta.clone()));
+		assert_eq!(meta_db.get(&acc, (1, h1)).unwrap(), Some(AccountMeta::default()));
+		assert_eq!(meta_db.get(&acc, (2, h2a)).unwrap(), None);
+		assert_eq!(meta_db.get(&acc, (2, h2b)).unwrap(), Some(AccountMeta::default()));
+		assert_eq!(meta_db.get(&acc, (3, h3a)).unwrap(), None);
+		assert_eq!(meta_db.get(&acc, (3, h3b)).unwrap(), Some(new_meta.clone()));
 	}
 }

@@ -18,6 +18,7 @@
 
 use account_db::{AccountDB, AccountDBMut};
 use snapshot::Error;
+use state::AccountMeta;
 
 use util::{U256, FixedHash, H256, Bytes, HashDB, DBValue, SHA3_EMPTY, SHA3_NULL_RLP};
 use util::trie::{TrieDB, Trie};
@@ -91,6 +92,18 @@ impl Account {
 			.append(&self.code_hash);
 
 		stream.out()
+	}
+
+	// convert the account to an account meta,
+	// without setting the code size.
+	pub fn to_meta(&self) -> AccountMeta {
+		AccountMeta {
+			code_size: 0,
+			nonce: self.nonce.clone(),
+			balance: self.balance.clone(),
+			storage_root: self.storage_root.clone(),
+			code_hash: self.code_hash.clone(),
+		}
 	}
 
 	// walk the account's storage trie, returning an RLP item containing the

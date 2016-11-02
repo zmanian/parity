@@ -520,11 +520,11 @@ impl State {
 					account.commit_code(account_db.as_hashdb_mut());
 				}
 
-				if let Some(prev) = db.get_from_meta(&address) {
-					db.set_meta(*address, account.account_meta(prev));
+				if let Some(prev) = db.get_from_meta(&addr_hash) {
+					db.set_meta(addr_hash, account.account_meta(prev));
 				}
 			} else {
-				db.remove_meta(*address);
+				db.remove_meta(address.sha3());
 			}
 		}
 

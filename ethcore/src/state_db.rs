@@ -325,9 +325,9 @@ impl StateDB {
 
 	/// Query the meta db about a given account at the canonical parent block.
 	/// Returns `None` if there is no canonical parent block.
-	pub fn get_from_meta(&self, addr: &Address) -> Option<Option<AccountMeta>> {
+	pub fn get_from_meta(&self, addr_hash: &H256) -> Option<Option<AccountMeta>> {
 		if let (Some(p_hash), Some(p_num)) = (self.parent_hash, self.parent_number) {
-			match self.meta_db.get(addr, (p_num, p_hash)) {
+			match self.meta_db.get(addr_hash, (p_num, p_hash)) {
 				Ok(meta) => Some(meta),
 				Err(e) => {
 					panic!("Encountered error {:?} while querying meta_db.", e);
@@ -339,13 +339,13 @@ impl StateDB {
 	}
 
 	/// Set the meta data for a given account.
-	pub fn set_meta(&mut self, addr: Address, meta: AccountMeta) {
-		self.meta_db.set(addr, meta);
+	pub fn set_meta(&mut self, addr_hash: H256, meta: AccountMeta) {
+		self.meta_db.set(addr_hash, meta);
 	}
 
 	/// Remove the meta data for a given account.
-	pub fn remove_meta(&mut self, addr: Address) {
-		self.meta_db.remove(addr);
+	pub fn remove_meta(&mut self, addr_hash: H256) {
+		self.meta_db.remove(addr_hash);
 	}
 
 	/// Clone the database.
@@ -438,7 +438,7 @@ impl StateDB {
 
 		match cache.accounts.get_mut(addr).map(|a| a.as_ref().map(|a| a.clone_basic())) {
 			Some(acc) => Some(acc),
-			None => self.get_from_meta(addr).map(|c| c.map(Account::from_meta)),
+			None => self.get_from_meta(&addr.sha3()).map(|c| c.map(Account::from_meta)),
 		}
 	}
 
@@ -460,7 +460,7 @@ impl StateDB {
 		}
 		match cache.accounts.get_mut(a) {
 			Some(c) => Some(f(c.as_mut())),
-			None => self.get_from_meta(a).map(|c| f(c.map(Account::from_meta).as_mut())),
+			None => self.get_from_meta(&a.sha3()).map(|c| f(c.map(Account::from_meta).as_mut())),
 		}
 	}
 

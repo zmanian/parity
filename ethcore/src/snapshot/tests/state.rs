@@ -50,19 +50,21 @@ fn snap_and_restore() {
 
 	let state_hashes = chunk_state(&old_db, &state_root, &writer, &Progress::default()).unwrap();
 
-	writer.into_inner().finish(::snapshot::ManifestData {
+	let manifest = ::snapshot::ManifestData {
 		state_hashes: state_hashes,
 		block_hashes: Vec::new(),
 		state_root: state_root,
 		block_number: 0,
 		block_hash: H256::default(),
-	}).unwrap();
+	};
+
+	writer.into_inner().finish(manifest.clone()).unwrap();
 
 	let mut db_path = snap_dir.as_path().to_owned();
 	db_path.push("db");
 	let db = {
 		let new_db = Arc::new(Database::open(&db_cfg, &db_path.to_string_lossy()).unwrap());
-		let mut rebuilder = StateRebuilder::new(new_db.clone(), Algorithm::Archive);
+		let mut rebuilder = StateRebuilder::new(new_db.clone(), Algorithm::Archive, &manifest).unwrap();
 		let reader = PackedReader::new(&snap_file).unwrap().unwrap();
 
 		for chunk_hash in &reader.manifest().state_hashes {
@@ -73,7 +75,7 @@ fn snap_and_restore() {
 		}
 
 		assert_eq!(rebuilder.state_root(), state_root);
-		rebuilder.check_missing().unwrap();
+		rebuilder.finalize().unwrap();
 
 		new_db
 	};

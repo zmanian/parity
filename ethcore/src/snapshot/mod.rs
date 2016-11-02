@@ -28,6 +28,7 @@ use blockchain::{BlockChain, BlockProvider};
 use engines::Engine;
 use header::Header;
 use ids::BlockID;
+use state::MetaDB;
 use views::BlockView;
 
 use util::{Bytes, Hashable, HashDB, DBValue, snappy, U256, Uint};
@@ -388,7 +389,9 @@ pub fn chunk_state<'a>(db: &HashDB, root: &H256, writer: &Mutex<SnapshotWriter +
 /// Used to rebuild the state trie piece by piece.
 pub struct StateRebuilder {
 	db: Box<JournalDB>,
+	meta_db: MetaDB,
 	state_root: H256,
+	canon_block: (u64, H256),
 	code_map: HashMap<H256, Bytes>, // maps code hashes to code itself.
 	missing_code: HashMap<H256, Vec<H256>>, // maps code hashes to lists of accounts missing that code.
 	bloom: Bloom,
@@ -396,14 +399,22 @@ pub struct StateRebuilder {
 
 impl StateRebuilder {
 	/// Create a new state rebuilder to write into the given backing DB.
-	pub fn new(db: Arc<Database>, pruning: Algorithm) -> Self {
-		StateRebuilder {
+	pub fn new(db: Arc<Database>, pruning: Algorithm, manifest: &ManifestData) -> Result<Self, String> {
+		let mut meta_db = try!(MetaDB::new(db.clone(), ::db::COL_META, &H256::zero()));
+
+		let mut batch = db.transaction();
+		meta_db.update_base(&mut batch, manifest.block_number, manifest.block_hash);
+		db.write_buffered(batch);
+
+		Ok(StateRebuilder {
 			db: journaldb::new(db.clone(), pruning, ::db::COL_STATE),
+			meta_db: meta_db,
 			state_root: SHA3_NULL_RLP,
+			canon_block: (manifest.block_number, manifest.block_hash),
 			code_map: HashMap::new(),
 			missing_code: HashMap::new(),
 			bloom: StateDB::load_bloom(&*db),
-		}
+		})
 	}
 
 	/// Feed an uncompressed state chunk into the rebuilder.
@@ -423,17 +434,28 @@ impl StateRebuilder {
 
 		for (account_chunk, out_pairs_chunk) in account_fat_rlps.chunks(chunk_size).zip(pairs.chunks_mut(chunk_size)) {
 			let code_map = &self.code_map;
-			let status = try!(rebuild_accounts(self.db.as_hashdb_mut(), account_chunk, out_pairs_chunk, code_map));
+			let status = try!(rebuild_accounts(self.db.as_hashdb_mut(), &mut self.meta_db, account_chunk, out_pairs_chunk, code_map));
 			chunk_code.extend(status.new_code);
 			for (addr_hash, code_hash) in status.missing_code {
 				self.missing_code.entry(code_hash).or_insert_with(Vec::new).push(addr_hash);
 			}
 		}
+
 		// patch up all missing code. must be done after collecting all new missing code entries.
 		for (code_hash, code) in chunk_code {
 			for addr_hash in self.missing_code.remove(&code_hash).unwrap_or_else(Vec::new) {
 				let mut db = AccountDBMut::from_hash(self.db.as_hashdb_mut(), addr_hash);
 				db.emplace(code_hash, DBValue::from_slice(&code));
+
+				// update meta_db entry for all entries.
+				let mut meta = match self.meta_db.get(&addr_hash, self.canon_block) {
+					Ok(Some(prev)) => prev,
+					_ => return Err(Error::MissingMeta(addr_hash).into()),
+				};
+
+				meta.code_size = code.len();
+
+				self.meta_db.set(addr_hash, meta);
 			}
 
 			self.code_map.insert(code_hash, code);
@@ -461,19 +483,24 @@ impl StateRebuilder {
 		let mut batch = backing.transaction();
 		try!(StateDB::commit_bloom(&mut batch, bloom_journal));
 		try!(self.db.inject(&mut batch));
+		self.meta_db.inject(&mut batch);
 		backing.write_buffered(batch);
 		trace!(target: "snapshot", "current state root: {:?}", self.state_root);
 		Ok(())
 	}
 
-	/// Check for accounts missing code. Once all chunks have been fed, there should
+	/// Finalize the rebuilding, given a block number and hash.
+	/// Checks for accounts missing code. Once all chunks have been fed, there should
 	/// be none.
-	pub fn check_missing(self) -> Result<(), Error> {
+	/// Also updates the meta database.
+	pub fn finalize(self) -> Result<(), Error> {
 		let missing = self.missing_code.keys().cloned().collect::<Vec<_>>();
-		match missing.is_empty() {
-			true => Ok(()),
-			false => Err(Error::MissingCode(missing)),
+
+		if !missing.is_empty() {
+			return Err(Error::MissingCode(missing));
 		}
+
+		Ok(())
 	}
 
 	/// Get the state root of the rebuilder.
@@ -487,9 +514,12 @@ struct RebuiltStatus {
 }
 
 // rebuild a set of accounts and their storage.
-// returns
+// returns a status message of newly found code and accounts still missing code.
+// tentatively places accounts into the meta db, but with an inaccurate code size
+// field when missing.
 fn rebuild_accounts(
 	db: &mut HashDB,
+	meta_db: &mut MetaDB,
 	account_chunk: &[&[u8]],
 	out_chunk: &mut [(H256, Bytes)],
 	code_map: &HashMap<H256, Bytes>
@@ -508,16 +538,24 @@ fn rebuild_accounts(
 			// fill out the storage trie and code while decoding.
 			let (acc, maybe_code) = try!(Account::from_fat_rlp(&mut acct_db, fat_rlp, code_map));
 
+			let mut account_meta = acc.to_meta();
 			let code_hash = acc.code_hash().clone();
 			match maybe_code {
-				Some(code) => status.new_code.push((code_hash, code)),
+				Some(code) => {
+					account_meta.code_size = code.len();
+					status.new_code.push((code_hash, code));
+				}
 				None => {
-					if code_hash != ::util::SHA3_EMPTY && !code_map.contains_key(&code_hash) {
-						status.missing_code.push((hash, code_hash));
+					if code_hash != ::util::SHA3_EMPTY {
+						match code_map.get(&code_hash) {
+							Some(code) => { account_meta.code_size = code.len() },
+							None => { status.missing_code.push((hash, code_hash)) },
+						}
 					}
 				}
 			}
 
+			meta_db.set(hash, account_meta);
 			acc.to_thin_rlp()
 		};
 
