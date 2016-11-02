@@ -264,6 +264,8 @@ impl MetaDB {
 			(rlp.val_at(0), rlp.val_at(1))
 		}).unwrap_or_else(|| (0, genesis_hash.clone()));
 
+		trace!(target: "meta_db", "Creating meta_db with base {:?}", base);
+
 		let journal = try!(Journal::read_from(&*db, col, base));
 
 		Ok(MetaDB {
@@ -303,6 +305,9 @@ impl MetaDB {
 	pub fn mark_canonical(&mut self, batch: &mut DBTransaction, end_era: u64, canon_id: H256) {
 		trace!(target: "meta_db", "mark_canonical: ({}, {})", end_era, canon_id);
 		let mut journal = self.journal.write();
+
+		// early exit if this state is before or equivalent to our canonical base.
+		if journal.canon_base.0 >= end_era { return }
 
 		let candidate_hashes: Vec<_> = journal.entries.keys()
 			.skip_while(|&&(ref e, _)| e < &end_era)

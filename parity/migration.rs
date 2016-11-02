@@ -30,7 +30,7 @@ use ethcore::migrations::Extract;
 /// Database is assumed to be at default version, when no version file is found.
 const DEFAULT_VERSION: u32 = 5;
 /// Current version of database models.
-const CURRENT_VERSION: u32 = 10;
+const CURRENT_VERSION: u32 = 11;
 /// First version of the consolidated database.
 const CONSOLIDATION_VERSION: u32 = 9;
 /// Defines how many items are migrated to the new version of database at once.
@@ -143,9 +143,10 @@ pub fn default_migration_settings(compaction_profile: &CompactionProfile) -> Mig
 }
 
 /// Migrations on the consolidated database.
-fn consolidated_database_migrations(compaction_profile: &CompactionProfile) -> Result<MigrationManager, Error> {
+fn consolidated_database_migrations(compaction_profile: &CompactionProfile, pruning: Algorithm) -> Result<MigrationManager, Error> {
 	let mut manager = MigrationManager::new(default_migration_settings(compaction_profile));
-	try!(manager.add_migration(migrations::ToV10::new()).map_err(|_| Error::MigrationImpossible));
+	try!(manager.add_migration(migrations::ToV10::new()).map_err(Error::Internal));
+	try!(manager.add_migration(migrations::ToV11::new(pruning)).map_err(Error::Internal));
 	Ok(manager)
 }
 
@@ -265,7 +266,8 @@ pub fn migrate(path: &Path, pruning: Algorithm, compaction_profile: CompactionPr
 	// Further migrations
 	if version >= CONSOLIDATION_VERSION && version < CURRENT_VERSION && exists(&consolidated_database_path(path)) {
 		println!("Migrating database from version {} to {}", ::std::cmp::max(CONSOLIDATION_VERSION, version), CURRENT_VERSION);
-		try!(migrate_database(version, consolidated_database_path(path), try!(consolidated_database_migrations(&compaction_profile))));
+		let consolidated_migrations = try!(consolidated_database_migrations(&compaction_profile, pruning));
+		try!(migrate_database(version, consolidated_database_path(path), consolidated_migrations));
 		println!("Migration finished");
 	}
 
