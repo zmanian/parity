@@ -35,4 +35,5 @@ pub use self::evm::{Evm, Error, Result, CostType};
 pub use self::ext::{Ext, ContractCreateResult, MessageCallResult};
 pub use self::factory::{Factory, VMType};
 pub use self::schedule::Schedule;
+pub use self::interpreter::SharedStack;
 pub use types::executed::CallType;

@@ -18,7 +18,7 @@ use util::*;
 use action_params::{ActionParams, ActionValue};
 use env_info::EnvInfo;
 use types::executed::CallType;
-use evm::{self, Ext, Evm, Schedule, Factory, VMType, ContractCreateResult, MessageCallResult};
+use evm::{self, Ext, Schedule, Factory, VMType, ContractCreateResult, MessageCallResult};
 use std::fmt::Debug;
 
 pub struct FakeLogEntry {
@@ -187,7 +187,7 @@ fn run_default_vm(factory: super::Factory, params: ActionParams) -> (U256, FakeE
 }
 
 fn run_vm(factory: super::Factory, params: ActionParams, ext: FakeExt) -> evm::Result<U256> {
-	let mut vm : Box<evm::Evm<FakeExt>> = factory.create(params.gas);
+	let mut vm : Box<evm::Evm<FakeExt>> = factory.create(params.gas, Default::default());
 	vm.exec(params, ext)
 }
 
@@ -202,9 +202,7 @@ fn test_stack_underflow() {
 	params.code = Some(Arc::new(code));
 
 	let result = {
-		let mut vm = Box::new(
-			super::interpreter::Interpreter::<usize, FakeExt>::new(Arc::new(super::interpreter::SharedCache::default()))
-		);
+		let mut vm = super::Factory::new(VMType::Interpreter, 1).create(params.gas, Default::default());
 		vm.exec(params, FakeExt::new().0)
 	};
 

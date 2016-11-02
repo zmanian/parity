@@ -22,7 +22,7 @@ use engines::Engine;
 use types::executed::CallType;
 use env_info::EnvInfo;
 use error::ExecutionError;
-use evm::{self, Ext, Factory};
+use evm::{self, Ext, Factory, SharedStack};
 use externalities::*;
 use trace::{FlatTrace, Tracer, NoopTracer, ExecutiveTracer, VMTrace, VMTracer, ExecutiveVMTracer, NoopVMTracer};
 use transaction::{Action, SignedTransaction};
@@ -62,6 +62,7 @@ pub struct Executive<'a> {
 	engine: &'a Engine,
 	vm_factory: &'a Factory,
 	depth: usize,
+	stack: SharedStack<U256>,
 }
 
 impl<'a> Executive<'a> {
@@ -73,17 +74,26 @@ impl<'a> Executive<'a> {
 			engine: engine,
 			vm_factory: vm_factory,
 			depth: 0,
+			stack: SharedStack::default(),
 		}
 	}
 
 	/// Populates executive from parent properties. Increments executive depth.
-	pub fn from_parent(state: &'a mut State, info: &'a EnvInfo, engine: &'a Engine, vm_factory: &'a Factory, parent_depth: usize) -> Self {
+	pub fn from_parent(
+		state: &'a mut State,
+		info: &'a EnvInfo,
+		engine: &'a Engine,
+		vm_factory: &'a Factory,
+		parent_depth: usize,
+		stack: SharedStack<U256>,
+	) -> Self {
 		Executive {
 			state: state,
 			info: info,
 			engine: engine,
 			vm_factory: vm_factory,
 			depth: parent_depth + 1,
+			stack: stack,
 		}
 	}
 
@@ -96,7 +106,19 @@ impl<'a> Executive<'a> {
 		tracer: &'any mut T,
 		vm_tracer: &'any mut V
 	) -> Externalities<'any, T, V> where T: Tracer, V: VMTracer {
-		Externalities::new(self.state, self.info, self.engine, self.vm_factory, self.depth, origin_info, substate, output, tracer, vm_tracer)
+		Externalities::new(
+			self.state,
+			self.info,
+			self.engine,
+			self.vm_factory,
+			self.depth,
+			self.stack.clone(),
+			origin_info,
+			substate,
+			output,
+			tracer,
+			vm_tracer
+		)
 	}
 
 	/// This function should be used to execute transaction.
@@ -223,9 +245,10 @@ impl<'a> Executive<'a> {
 		// Ordinary execution - keep VM in the same thread
 		if (self.depth + 1) % depth_threshold != 0 {
 			let vm_factory = self.vm_factory;
+			let stack = self.stack.clone();
 			let ext = self.as_externalities(OriginInfo::from(&params), unconfirmed_substate, output_policy, tracer, vm_tracer);
 			trace!(target: "executive", "ext.schedule.have_delegate_call: {}", ext.schedule().have_delegate_call);
-			return vm_factory.create(params.gas).exec(params, ext);
+			return vm_factory.create(params.gas, stack).exec(params, ext);
 		}
 
 		// Start in a new thread to reset the stack.
@@ -233,10 +256,12 @@ impl<'a> Executive<'a> {
 		// https://github.com/aturon/crossbeam/issues/16
 		crossbeam::scope(|scope| {
 			let vm_factory = self.vm_factory;
+			let stack = self.stack.clone();
 			let ext = self.as_externalities(OriginInfo::from(&params), unconfirmed_substate, output_policy, tracer, vm_tracer);
 
 			scope.spawn(move || {
-				vm_factory.create(params.gas).exec(params, ext)
+				// TODO [todr] Either consider changing shared_stack to Arc or start a new stack here?
+				vm_factory.create(params.gas, stack).exec(params, ext)
 			})
 		}).join()
 	}

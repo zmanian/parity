@@ -14,7 +14,10 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::fmt;
+use std::ops::Deref;
+use std::rc::Rc;
+use std::cell::RefCell;
+
 use evm::instructions;
 
 /// Stack trait with VM-friendly API
@@ -41,21 +44,13 @@ pub trait Stack<T> {
 	fn expand(&mut self, size: usize);
 }
 
+#[derive(Default)]
 pub struct VecStack<S> {
 	stack: Vec<S>,
 	logs: [S; instructions::MAX_NO_OF_TOPICS]
 }
 
-impl<S : Copy> VecStack<S> {
-	pub fn with_capacity(capacity: usize, zero: S) -> Self {
-		VecStack {
-			stack: Vec::with_capacity(capacity),
-			logs: [zero; instructions::MAX_NO_OF_TOPICS]
-		}
-	}
-}
-
-impl<S : fmt::Display> Stack<S> for VecStack<S> {
+impl<S> Stack<S> for VecStack<S> {
 	fn expand(&mut self, size: usize) {
 		let capacity = self.stack.capacity();
 		if capacity < size {
@@ -68,10 +63,12 @@ impl<S : fmt::Display> Stack<S> for VecStack<S> {
 	}
 
 	fn peek(&self, no_from_top: usize) -> &S {
+		assert!(self.stack.len() >= 1 + no_from_top, "peek asked for more items than exist.");
 		&self.stack[self.stack.len() - no_from_top - 1]
 	}
 
 	fn swap_with_top(&mut self, no_from_top: usize) {
+		assert!(self.stack.len() >= 1 + no_from_top, "swap_with_top asked for more items than exist.");
 		let len = self.stack.len();
 		self.stack.swap(len - no_from_top - 1, len - 1);
 	}
@@ -111,3 +108,134 @@ impl<S : fmt::Display> Stack<S> for VecStack<S> {
 	}
 }
 
+#[derive(Default)]
+pub struct SharedStack<S>(Rc<RefCell<ShareableStack<S>>>);
+
+impl<S> Deref for SharedStack<S> {
+	type Target = Rc<RefCell<ShareableStack<S>>>;
+
+	fn deref(&self) -> &Self::Target {
+		&self.0
+	}
+}
+
+impl<S> Clone for SharedStack<S> {
+	fn clone(&self) -> Self {
+		SharedStack(self.0.clone())
+	}
+}
+
+unsafe impl<S> Send for SharedStack<S> {}
+unsafe impl<S> Sync for SharedStack<S> {}
+
+pub struct ShareableStack<S> {
+	stack: VecStack<S>,
+	bottom: Vec<usize>,
+}
+
+impl<S: Default> Default for ShareableStack<S> {
+	fn default() -> Self {
+		ShareableStack {
+			stack: VecStack::default(),
+			bottom: vec![0],
+		}
+	}
+}
+
+impl<S> ShareableStack<S> {
+	pub fn checkpoint(&mut self) {
+		self.bottom.push(self.stack.size());
+	}
+
+	pub fn pop_checkpoint(&mut self) {
+		assert!(self.bottom.len() > 1);
+		self.clear();
+		self.bottom.pop();
+	}
+
+	fn bottom(&self) -> usize {
+		self.bottom[self.bottom.len() - 1]
+	}
+}
+
+impl<S> Stack<S> for ShareableStack<S> {
+	fn expand(&mut self, size: usize) {
+		let bottom = self.bottom();
+		let capacity = self.stack.stack.capacity();
+		if capacity + bottom < size {
+			self.stack.stack.reserve(size - capacity - bottom);
+		}
+	}
+
+	fn clear(&mut self) {
+		let bottom = self.bottom();
+		self.stack.stack.truncate(bottom);
+	}
+
+	fn peek(&self, no_from_top: usize) -> &S {
+		assert!(self.has(no_from_top), "peek asked for more items than exist.");
+		&self.stack.stack[self.stack.size() - no_from_top - 1]
+	}
+
+	fn swap_with_top(&mut self, no_from_top: usize) {
+		assert!(self.has(no_from_top), "swap_with_top asked for more items than exist.");
+		self.stack.swap_with_top(no_from_top);
+	}
+
+	fn has(&self, no_of_elems: usize) -> bool {
+		self.stack.size() >= no_of_elems + self.bottom()
+	}
+
+	fn pop_back(&mut self) -> S {
+		assert!(self.has(1), "Tried to pop from empty stack.");
+		self.stack.pop_back()
+	}
+
+	fn pop_n(&mut self, no_of_elems: usize) -> &[S] {
+		assert!(self.has(no_of_elems), "Tried to pop_n more then there is on stack.");
+		self.stack.pop_n(no_of_elems)
+	}
+
+	fn push(&mut self, elem: S) {
+		self.stack.push(elem);
+	}
+
+	fn size(&self) -> usize {
+		self.stack.size() - self.bottom()
+	}
+
+	fn peek_top(&self, no_from_top: usize) -> &[S] {
+		assert!(self.has(no_from_top), "peek_top asked for more items than exist.");
+		self.stack.peek_top(no_from_top)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{ShareableStack, Stack};
+
+
+	#[test]
+	fn should_allow_to_checkpoint_shared_stack() {
+		// given
+		let mut stack = ShareableStack::default();
+		stack.push(10);
+
+		// when
+		stack.checkpoint();
+		assert_eq!(stack.has(1), false);
+		assert_eq!(stack.size(), 0);
+		stack.push(5);
+		assert_eq!(stack.has(1), true);
+		assert_eq!(stack.size(), 1);
+		stack.clear();
+		assert_eq!(stack.size(), 0);
+
+		// and then
+		stack.pop_checkpoint();
+		assert_eq!(stack.has(1), true);
+		assert_eq!(stack.size(), 1);
+		assert_eq!(stack.pop_back(), 10);
+		assert_eq!(stack.size(), 0);
+	}
+}

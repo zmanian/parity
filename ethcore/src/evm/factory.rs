@@ -21,7 +21,7 @@ use std::fmt;
 use std::sync::Arc;
 use evm::{self, Evm};
 use util::{U256, Uint};
-use super::interpreter::SharedCache;
+use super::interpreter::{SharedStack, SharedCache};
 
 #[derive(Debug, PartialEq, Clone)]
 /// Type of EVM to use.
@@ -92,15 +92,15 @@ impl Factory {
 	/// Create fresh instance of VM
 	/// Might choose implementation depending on supplied gas.
 	#[cfg(feature = "jit")]
-	pub fn create<'a, Ext: evm::Ext + 'a>(&self, gas: U256) -> Box<Evm<Ext> + 'a> {
+	pub fn create<'a, Ext: evm::Ext + 'a>(&self, gas: U256, stack: SharedStack<U256>) -> Box<Evm<Ext> + 'a> {
 		match self.evm {
 			VMType::Jit => {
 				Box::new(super::jit::JitEvm::default())
 			},
 			VMType::Interpreter => if Self::can_fit_in_usize(gas) {
-				Box::new(super::interpreter::Interpreter::<usize, Ext>::new(self.evm_cache.clone()))
+				Box::new(super::interpreter::Interpreter::<usize, Ext>::new(self.evm_cache.clone(), stack))
 			} else {
-				Box::new(super::interpreter::Interpreter::<U256, Ext>::new(self.evm_cache.clone()))
+				Box::new(super::interpreter::Interpreter::<U256, Ext>::new(self.evm_cache.clone(), stack))
 			}
 		}
 	}
@@ -108,12 +108,12 @@ impl Factory {
 	/// Create fresh instance of VM
 	/// Might choose implementation depending on supplied gas.
 	#[cfg(not(feature = "jit"))]
-	pub fn create<'a, Ext: evm::Ext + 'a>(&self, gas: U256) -> Box<Evm<Ext> + 'a> {
+	pub fn create<'a, Ext: evm::Ext + 'a>(&self, gas: U256, stack: SharedStack<U256>) -> Box<Evm<Ext> + 'a> {
 		match self.evm {
 			VMType::Interpreter => if Self::can_fit_in_usize(gas) {
-				Box::new(super::interpreter::Interpreter::<usize, Ext>::new(self.evm_cache.clone()))
+				Box::new(super::interpreter::Interpreter::<usize, Ext>::new(self.evm_cache.clone(), stack))
 			} else {
-				Box::new(super::interpreter::Interpreter::<U256, Ext>::new(self.evm_cache.clone()))
+				Box::new(super::interpreter::Interpreter::<U256, Ext>::new(self.evm_cache.clone(), stack))
 			}
 		}
 	}

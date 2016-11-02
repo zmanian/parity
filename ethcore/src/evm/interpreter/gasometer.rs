@@ -14,11 +14,13 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::cell::Ref;
+
 use util::*;
 use super::u256_to_address;
 use evm::{self, CostType};
 use evm::instructions::{self, Instruction, InstructionInfo};
-use evm::interpreter::stack::Stack;
+use evm::interpreter::stack::{Stack, ShareableStack};
 use evm::schedule::Schedule;
 
 macro_rules! overflowing {
@@ -109,7 +111,7 @@ impl<Gas: CostType> Gasometer<Gas> {
 		ext: &Ext,
 		instruction: Instruction,
 		info: &InstructionInfo,
-		stack: &Stack<U256>,
+		stack: Ref<ShareableStack<U256>>,
 		current_mem_size: usize,
 	) -> evm::Result<InstructionRequirements<Gas>> {
 		let schedule = ext.schedule();

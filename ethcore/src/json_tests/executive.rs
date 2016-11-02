@@ -21,7 +21,7 @@ use executive::*;
 use engines::Engine;
 use env_info::EnvInfo;
 use evm;
-use evm::{Schedule, Ext, Factory, Finalize, VMType, ContractCreateResult, MessageCallResult};
+use evm::{Schedule, Ext, Factory, VMType, ContractCreateResult, MessageCallResult, SharedStack};
 use externalities::*;
 use types::executed::CallType;
 use tests::helpers::*;
@@ -53,7 +53,7 @@ impl From<ethjson::vm::Call> for CallCreate {
 /// Stores callcreates.
 struct TestExt<'a, T, V> where T: 'a + Tracer, V: 'a + VMTracer {
 	ext: Externalities<'a, T, V>,
-	callcreates: Vec<CallCreate>,
+	callcreates: Rc<RefCell<Vec<CallCreate>>>,
 	contract_address: Address
 }
 
@@ -64,6 +64,7 @@ impl<'a, T, V> TestExt<'a, T, V> where T: 'a + Tracer, V: 'a + VMTracer {
 		engine: &'a Engine,
 		vm_factory: &'a Factory,
 		depth: usize,
+		stack: SharedStack<U256>,
 		origin_info: OriginInfo,
 		substate: &'a mut Substate,
 		output: OutputPolicy<'a, 'a>,
@@ -73,8 +74,20 @@ impl<'a, T, V> TestExt<'a, T, V> where T: 'a + Tracer, V: 'a + VMTracer {
 	) -> Self {
 		TestExt {
 			contract_address: contract_address(&address, &state.nonce(&address)),
-			ext: Externalities::new(state, info, engine, vm_factory, depth, origin_info, substate, output, tracer, vm_tracer),
-			callcreates: vec![]
+			ext: Externalities::new(
+				state,
+				info,
+				engine,
+				vm_factory,
+				depth,
+				stack,
+				origin_info,
+				substate,
+				output,
+				tracer,
+				vm_tracer
+			),
+			callcreates: Rc::new(RefCell::new(vec![])),
 		}
 	}
 }
@@ -101,7 +114,7 @@ impl<'a, T, V> Ext for TestExt<'a, T, V> where T: Tracer, V: VMTracer {
 	}
 
 	fn create(&mut self, gas: &U256, value: &U256, code: &[u8]) -> ContractCreateResult {
-		self.callcreates.push(CallCreate {
+		self.callcreates.borrow_mut().push(CallCreate {
 			data: code.to_vec(),
 			destination: None,
 			gas_limit: *gas,
@@ -120,7 +133,7 @@ impl<'a, T, V> Ext for TestExt<'a, T, V> where T: Tracer, V: VMTracer {
 		_output: &mut [u8],
 		_call_type: CallType
 	) -> MessageCallResult {
-		self.callcreates.push(CallCreate {
+		self.callcreates.borrow_mut().push(CallCreate {
 			data: data.to_vec(),
 			destination: Some(receive_address.clone()),
 			gas_limit: *gas,
@@ -200,15 +213,17 @@ fn do_json_test_for(vm_type: &VMType, json_data: &[u8]) -> Vec<String> {
 		let mut tracer = NoopTracer;
 		let mut vm_tracer = NoopVMTracer;
 		let mut output = vec![];
+		let shared_stack = SharedStack::default();
 
 		// execute
 		let (res, callcreates) = {
-			let mut ex = TestExt::new(
+			let ex = TestExt::new(
 				&mut state,
 				&info,
 				&engine,
 				&vm_factory,
 				0,
+				shared_stack.clone(),
 				OriginInfo::from(&params),
 				&mut substate,
 				OutputPolicy::Return(BytesRef::Flexible(&mut output), None),
@@ -216,11 +231,10 @@ fn do_json_test_for(vm_type: &VMType, json_data: &[u8]) -> Vec<String> {
 				&mut tracer,
 				&mut vm_tracer,
 			);
-			let mut evm = vm_factory.create(params.gas);
-			let res = evm.exec(params, &mut ex);
-			// a return in finalize will not alter callcreates
 			let callcreates = ex.callcreates.clone();
-			(res.finalize(ex), callcreates)
+			let mut evm = vm_factory.create(params.gas, shared_stack);
+			let res = evm.exec(params, ex);
+			(res, callcreates.borrow().clone())
 		};
 
 		match res {
