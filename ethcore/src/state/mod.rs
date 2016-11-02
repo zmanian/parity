@@ -521,7 +521,11 @@ impl State {
 				}
 
 				if let Some(prev) = db.get_from_meta(&addr_hash) {
-					db.set_meta(addr_hash, account.account_meta(prev));
+					let new_meta = account.account_meta(prev.clone());
+
+					if Some(&new_meta) != prev.as_ref() {
+						db.set_meta(addr_hash, new_meta);
+					}
 				}
 			} else {
 				db.remove_meta(address.sha3());

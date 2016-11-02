@@ -303,11 +303,12 @@ impl MetaDB {
 	/// Mark a candidate for an era as canonical, applying its changes
 	/// and invalidating its siblings.
 	pub fn mark_canonical(&mut self, batch: &mut DBTransaction, end_era: u64, canon_id: H256) {
-		trace!(target: "meta_db", "mark_canonical: ({}, {})", end_era, canon_id);
 		let mut journal = self.journal.write();
 
-		// early exit if this state is before or equivalent to our canonical base.
-		if journal.canon_base.0 >= end_era { return }
+		// early exit if this state is before our canonical base.
+		if journal.canon_base.0 > end_era { return }
+
+		trace!(target: "meta_db", "mark_canonical: end=({}, {}), cur={:?}", end_era, canon_id, journal.canon_base);
 
 		let candidate_hashes: Vec<_> = journal.entries.keys()
 			.skip_while(|&&(ref e, _)| e < &end_era)
@@ -385,8 +386,6 @@ impl MetaDB {
 	///
 	/// Will fail on database error, state pruned, or unexpected missing journal entry.
 	pub fn get(&self, address_hash: &H256, at: (u64, H256)) -> Result<Option<AccountMeta>, Error> {
-		trace!(target: "meta_db", "get: {:?} at {:?}", address_hash, at);
-
 		let get_from_db = || match self.db.get(self.col, &*address_hash) {
 			Ok(meta) => Ok(meta.map(|x| ::rlp::decode(&x))),
 			Err(e) => Err(Error::Database(e)),
@@ -397,6 +396,7 @@ impl MetaDB {
 		}
 
 		let journal = self.journal.read();
+		trace!(target: "meta_db", "get: {:?} at={:?}, base={:?}", address_hash, at, journal.canon_base);
 
 		// fast path for base query.
 		if at == journal.canon_base {
@@ -407,14 +407,17 @@ impl MetaDB {
 		let mut entry = try!(journal.entries.get(&(era, id)).ok_or_else(|| Error::MissingJournalEntry(era, id)));
 
 		// iterate the modifications for this account in reverse order (by id),
+		'a:
 		for &(mod_era, ref mod_id) in journal.modifications.get(address_hash).into_iter().flat_map(|m| m.iter().rev()) {
-			if era <= journal.canon_base.0 { break }
+			debug_assert!(mod_era > journal.canon_base.0, "modification from pruned entry {:?} still remains in journal", (mod_era, mod_id));
 
 			// walk the relevant path down the journal backwards until we're aligned with
 			// the era
 			while era > mod_era {
 				id = entry.parent;
 				era -= 1;
+
+				if era == journal.canon_base.0 { break 'a }
 				entry = try!(journal.entries.get(&(era, id)).ok_or_else(|| Error::MissingJournalEntry(era, id)));
 			}
 

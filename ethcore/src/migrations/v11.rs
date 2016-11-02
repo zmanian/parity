@@ -111,7 +111,7 @@ impl Migration for ToV11 {
 		println!("Setting meta DB state to ({}, {})", best_header.number(), best_header.hash());
 
 		let mut base_stream = RlpStream::new_list(2);
-		base_stream.append(&best_header.number()).append(&best_header.hash());
+		base_stream.append(&best_header.number()).append(&&*best);
 
 		try!(batch.insert(b"base".to_vec(), base_stream.out(), dest));
 
