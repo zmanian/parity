@@ -286,6 +286,11 @@ impl MetaDB {
 			entries: ::std::mem::replace(&mut self.overlay, HashMap::new()),
 		};
 
+		if now <= journal.canon_base.0 {
+			trace!(target: "meta_db", "ignoring journal request for ancient era: {:?}", (now, id));
+			return;
+		}
+
 		for acc in j_entry.entries.keys() {
 			journal.modifications.entry(*acc).or_insert_with(BTreeSet::new).insert((now, id));
 		}
