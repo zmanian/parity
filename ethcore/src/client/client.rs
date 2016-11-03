@@ -766,7 +766,7 @@ impl snapshot::DatabaseRestore for Client {
 		*chain = Arc::new(BlockChain::new(self.config.blockchain.clone(), &[], db.clone()));
 
 		let journal_db = journaldb::new(db.clone(), self.pruning, ::db::COL_STATE);
-		let meta_db = try!(::state::MetaDB::new(db.clone(), ::db::COL_STATE, &chain.genesis_hash())
+		let meta_db = try!(::state::MetaDB::new(db.clone(), ::db::COL_META, &chain.genesis_hash())
 			.map_err(ClientError::Database));
 		*state_db = StateDB::new(journal_db, meta_db, cache_size);
 		*tracedb = TraceDB::new(self.config.tracing.clone(), db.clone(), chain.clone());
