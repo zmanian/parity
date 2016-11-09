@@ -105,18 +105,23 @@ impl<A: Authorization + 'static> server::Handler<HttpStream> for Router<A> {
 				trace!(target: "dapps", "Resolving to fetchable content.");
 				self.fetch.to_async_handler(path.clone(), control)
 			},
+			// NOTE [todr] /home is redirected to home page since some users may have the redirection cached
+			// (in the past we used 301 instead of 302)
+			// It should be safe to remove it in (near) future.
+			//
 			// 404 for non-existent content
-			(Some(_), _) if *req.method() == hyper::method::Method::Get => {
+			(Some(ref path), _) if *req.method() == hyper::Method::Get && path.app_id != "home" => {
 				trace!(target: "dapps", "Resolving to 404.");
 				Box::new(ContentHandler::error(
 					StatusCode::NotFound,
 					"404 Not Found",
 					"Requested content was not found.",
 					None,
+					self.signer_port,
 				))
 			},
 			// Redirect any other GET request to signer.
-			_ if *req.method() == hyper::method::Method::Get => {
+			_ if *req.method() == hyper::Method::Get => {
 				if let Some(port) = self.signer_port {
 					trace!(target: "dapps", "Redirecting to signer interface.");
 					Redirection::boxed(&format!("http://{}", signer_address(port)))
@@ -127,6 +132,7 @@ impl<A: Authorization + 'static> server::Handler<HttpStream> for Router<A> {
 						"404 Not Found",
 						"Your homepage is not available when Trusted Signer is disabled.",
 						Some("You can still access dapps by writing a correct address, though. Re-enabled Signer to get your homepage back."),
+						self.signer_port,
 					))
 				}
 			},

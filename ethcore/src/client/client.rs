@@ -33,7 +33,7 @@ use io::*;
 use views::{HeaderView, BodyView, BlockView};
 use error::{ImportError, ExecutionError, CallError, BlockError, ImportResult, Error as EthcoreError};
 use header::BlockNumber;
-use state::State;
+use state::{State, CleanupMode};
 use spec::Spec;
 use basic_types::Seal;
 use engines::Engine;
@@ -45,6 +45,7 @@ use block::*;
 use transaction::{LocalizedTransaction, SignedTransaction, Action};
 use blockchain::extras::TransactionAddress;
 use types::filter::Filter;
+use types::mode::Mode as IpcMode;
 use log_entry::LocalizedLogEntry;
 use verification::queue::BlockQueue;
 use blockchain::{BlockChain, BlockProvider, TreeRoute, ImportRoute};
@@ -64,7 +65,7 @@ use evm::{Factory as EvmFactory, Schedule};
 use miner::{Miner, MinerService};
 use snapshot::{self, io as snapshot_io};
 use factory::Factories;
-use rlp::{View, UntrustedRlp};
+use rlp::{decode, View, UntrustedRlp};
 use state_db::StateDB;
 use rand::OsRng;
 
@@ -123,7 +124,7 @@ impl SleepState {
 /// Blockchain database client backed by a persistent database. Owns and manages a blockchain and a block queue.
 /// Call `import_block()` to import a block asynchronously; `flush_queue()` flushes the queue.
 pub struct Client {
-	mode: Mode,
+	mode: Mutex<Mode>,
 	chain: RwLock<Arc<BlockChain>>,
 	tracedb: RwLock<TraceDB<BlockChain>>,
 	engine: Arc<Engine>,
@@ -146,6 +147,7 @@ pub struct Client {
 	factories: Factories,
 	history: u64,
 	rng: Mutex<OsRng>,
+	on_mode_change: Mutex<Option<Box<FnMut(&Mode) + 'static + Send>>>,
 }
 
 impl Client {
@@ -210,7 +212,7 @@ impl Client {
 		let panic_handler = PanicHandler::new_in_arc();
 		panic_handler.forward_from(&block_queue);
 
-		let awake = match config.mode { Mode::Dark(..) => false, _ => true };
+		let awake = match config.mode { Mode::Dark(..) | Mode::Off => false, _ => true };
 
 		let factories = Factories {
 			vm: EvmFactory::new(config.vm_type.clone(), config.jump_table_size),
@@ -221,7 +223,7 @@ impl Client {
 		let client = Client {
 			sleep_state: Mutex::new(SleepState::new(awake)),
 			liveness: AtomicBool::new(awake),
-			mode: config.mode.clone(),
+			mode: Mutex::new(config.mode.clone()),
 			chain: RwLock::new(chain),
 			tracedb: tracedb,
 			engine: engine,
@@ -242,6 +244,7 @@ impl Client {
 			factories: factories,
 			history: history,
 			rng: Mutex::new(try!(OsRng::new().map_err(::util::UtilError::StdIo))),
+			on_mode_change: Mutex::new(None),
 		};
 		Ok(Arc::new(client))
 	}
@@ -259,11 +262,32 @@ impl Client {
 		}
 	}
 
+	/// Register an action to be done if a mode change happens. 
+	pub fn on_mode_change<F>(&self, f: F) where F: 'static + FnMut(&Mode) + Send {
+		*self.on_mode_change.lock() = Some(Box::new(f));
+	}
+
 	/// Flush the block import queue.
 	pub fn flush_queue(&self) {
 		self.block_queue.flush();
 		while !self.block_queue.queue_info().is_empty() {
 			self.import_verified_blocks();
+		}
+	}
+
+	/// The env info as of the best block.
+	fn latest_env_info(&self) -> EnvInfo {
+		let header_data = self.best_block_header();
+		let view = HeaderView::new(&header_data);
+
+		EnvInfo {
+			number: view.number(),
+			author: view.author(),
+			timestamp: view.timestamp(),
+			difficulty: view.difficulty(),
+			last_hashes: self.build_last_hashes(view.hash()),
+			gas_used: U256::default(),
+			gas_limit: view.gas_limit(),
 		}
 	}
 
@@ -614,7 +638,8 @@ impl Client {
 		self.block_queue.collect_garbage();
 		self.tracedb.read().collect_garbage();
 
-		match self.mode {
+		let mode = self.mode.lock().clone();
+		match mode {
 			Mode::Dark(timeout) => {
 				let mut ss = self.sleep_state.lock();
 				if let Some(t) = ss.last_activity {
@@ -766,7 +791,7 @@ impl BlockChainClient for Client {
 	fn call(&self, t: &SignedTransaction, block: BlockID, analytics: CallAnalytics) -> Result<Executed, CallError> {
 		let header = try!(self.block_header(block).ok_or(CallError::StatePruned));
 		let view = HeaderView::new(&header);
-		let last_hashes = self.build_last_hashes(view.hash());
+		let last_hashes = self.build_last_hashes(view.parent_hash());
 		let env_info = EnvInfo {
 			number: view.number(),
 			author: view.author(),
@@ -788,7 +813,7 @@ impl BlockChainClient for Client {
 		let needed_balance = t.value + t.gas * t.gas_price;
 		if balance < needed_balance {
 			// give the sender a sufficient balance
-			state.add_balance(&sender, &(needed_balance - balance));
+			state.add_balance(&sender, &(needed_balance - balance), CleanupMode::NoEmpty);
 		}
 		let options = TransactOptions { tracing: analytics.transaction_tracing, vm_tracing: analytics.vm_tracing, check_nonce: false };
 		let mut ret = try!(Executive::new(&mut state, &env_info, &*self.engine, &self.factories.vm).transact(t, options));
@@ -838,9 +863,40 @@ impl BlockChainClient for Client {
 	}
 
 	fn keep_alive(&self) {
-		if self.mode != Mode::Active {
+		let should_wake = match &*self.mode.lock() {
+			&Mode::Dark(..) | &Mode::Passive(..) => true,
+			_ => false,
+		};
+		if should_wake {
 			self.wake_up();
 			(*self.sleep_state.lock()).last_activity = Some(Instant::now());
+		}
+	}
+
+	fn mode(&self) -> IpcMode {
+		let r = self.mode.lock().clone().into();
+		trace!(target: "mode", "Asked for mode = {:?}. returning {:?}", &*self.mode.lock(), r);
+		r
+	}
+
+	fn set_mode(&self, new_mode: IpcMode) {
+		trace!(target: "mode", "Client::set_mode({:?})", new_mode);
+		{
+			let mut mode = self.mode.lock();
+			*mode = new_mode.clone().into();
+			trace!(target: "mode", "Mode now {:?}", &*mode);
+			match *self.on_mode_change.lock() {
+				Some(ref mut f) => {
+					trace!(target: "mode", "Making callback...");
+					f(&*mode)
+				},
+				_ => {} 
+			}
+		}
+		match new_mode {
+			IpcMode::Active => self.wake_up(),
+			IpcMode::Off => self.sleep(),
+			_ => {(*self.sleep_state.lock()).last_activity = Some(Instant::now()); }
 		}
 	}
 
@@ -994,7 +1050,9 @@ impl BlockChainClient for Client {
 							transaction_hash: transaction_hash.clone(),
 							transaction_index: transaction_index,
 							log_index: i
-						}).collect()
+						}).collect(),
+						log_bloom: receipt.log_bloom,
+						state_root: receipt.state_root,
 					})
 				},
 				_ => None
@@ -1153,24 +1211,28 @@ impl BlockChainClient for Client {
 	fn pending_transactions(&self) -> Vec<SignedTransaction> {
 		self.miner.pending_transactions(self.chain.read().best_block_number())
 	}
+
+	fn signing_network_id(&self) -> Option<u8> {
+		self.engine.signing_network_id(&self.latest_env_info())
+	}
+
+	fn block_extra_info(&self, id: BlockID) -> Option<BTreeMap<String, String>> {
+		self.block_header(id)
+			.map(|block| decode(&block))
+			.map(|header| self.engine.extra_info(&header))
+	}
+
+	fn uncle_extra_info(&self, id: UncleID) -> Option<BTreeMap<String, String>> {
+		self.uncle(id)
+			.map(|block| BlockView::new(&block).header())
+			.map(|header| self.engine.extra_info(&header))
+	}
 }
 
 impl MiningBlockChainClient for Client {
 
 	fn latest_schedule(&self) -> Schedule {
-		let header_data = self.best_block_header();
-		let view = HeaderView::new(&header_data);
-
-		let env_info = EnvInfo {
-			number: view.number(),
-			author: view.author(),
-			timestamp: view.timestamp(),
-			difficulty: view.difficulty(),
-			last_hashes: self.build_last_hashes(view.hash()),
-			gas_used: U256::default(),
-			gas_limit: view.gas_limit(),
-		};
-		self.engine.schedule(&env_info)
+		self.engine.schedule(&self.latest_env_info())
 	}
 
 	fn prepare_open_block(&self, author: Address, gas_range_target: (U256, U256), extra_data: Bytes) -> OpenBlock {

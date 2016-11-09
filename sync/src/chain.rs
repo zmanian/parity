@@ -188,7 +188,7 @@ pub struct SyncStatus {
 	/// Syncing protocol version. That's the maximum protocol version we connect to.
 	pub protocol_version: u8,
 	/// The underlying p2p network version.
-	pub network_id: U256,
+	pub network_id: usize,
 	/// `BlockChain` height for the moment the sync started.
 	pub start_block_number: BlockNumber,
 	/// Last fully downloaded and imported block number (if any).
@@ -269,7 +269,7 @@ struct PeerInfo {
 	/// Peer chain genesis hash
 	genesis: H256,
 	/// Peer network id
-	network_id: U256,
+	network_id: usize,
 	/// Peer best block hash
 	latest_hash: H256,
 	/// Peer total difficulty if known
@@ -328,7 +328,7 @@ pub struct ChainSync {
 	/// Last propagated block number
 	last_sent_block_number: BlockNumber,
 	/// Network ID
-	network_id: U256,
+	network_id: usize,
 	/// Optional fork block to check
 	fork_block: Option<(BlockNumber, H256)>,
 	/// Snapshot downloader.
@@ -1047,10 +1047,6 @@ impl ChainSync {
 
 	/// Resume downloading
 	fn continue_sync(&mut self, io: &mut SyncIo) {
-		if (self.state == SyncState::Blocks || self.state == SyncState::NewBlocks || self.state == SyncState::Idle)
-			&& !self.peers.values().any(|p| p.asking != PeerAsking::Nothing && p.block_set != Some(BlockSet::OldBlocks) && p.can_sync()) {
-			self.complete_sync(io);
-		}
 		let mut peers: Vec<(PeerId, U256, u8)> = self.peers.iter().filter_map(|(k, p)|
 			if p.can_sync() { Some((*k, p.difficulty.unwrap_or_else(U256::zero), p.protocol_version)) } else { None }).collect();
 		thread_rng().shuffle(&mut peers); //TODO: sort by rating
@@ -1061,6 +1057,11 @@ impl ChainSync {
 			if self.active_peers.contains(&p) {
 				self.sync_peer(io, p, false);
 			}
+		}
+		if (self.state != SyncState::WaitingPeers && self.state != SyncState::SnapshotWaiting && self.state != SyncState::Waiting && self.state != SyncState::Idle)
+			&& !self.peers.values().any(|p| p.asking != PeerAsking::Nothing && p.block_set != Some(BlockSet::OldBlocks) && p.can_sync()) {
+
+			self.complete_sync(io);
 		}
 	}
 
@@ -2144,7 +2145,7 @@ mod tests {
 			PeerInfo {
 				protocol_version: 0,
 				genesis: H256::zero(),
-				network_id: U256::zero(),
+				network_id: 0,
 				latest_hash: peer_latest_hash,
 				difficulty: None,
 				asking: PeerAsking::Nothing,

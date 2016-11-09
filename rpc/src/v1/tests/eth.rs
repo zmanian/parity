@@ -33,11 +33,11 @@ use util::{U256, H256, Uint, Address};
 use jsonrpc_core::IoHandler;
 use ethjson::blockchain::BlockChain;
 
-use v1::impls::{EthClient, EthSigningUnsafeClient};
+use v1::impls::{EthClient, SigningUnsafeClient};
 use v1::types::U256 as NU256;
 use v1::traits::eth::Eth;
 use v1::traits::eth_signing::EthSigning;
-use v1::tests::helpers::{TestSyncProvider, Config};
+use v1::tests::helpers::{TestSnapshotService, TestSyncProvider, Config};
 
 fn account_provider() -> Arc<AccountProvider> {
 	Arc::new(AccountProvider::transient_provider())
@@ -45,7 +45,7 @@ fn account_provider() -> Arc<AccountProvider> {
 
 fn sync_provider() -> Arc<TestSyncProvider> {
 	Arc::new(TestSyncProvider::new(Config {
-		network_id: U256::from(3),
+		network_id: 3,
 		num_peers: 120,
 	}))
 }
@@ -73,6 +73,10 @@ fn miner_service(spec: &Spec, accounts: Arc<AccountProvider>) -> Arc<Miner> {
 	)
 }
 
+fn snapshot_service() -> Arc<TestSnapshotService> {
+	Arc::new(TestSnapshotService::new())
+}
+
 fn make_spec(chain: &BlockChain) -> Spec {
 	let genesis = Genesis::from(chain.genesis());
 	let mut spec = ethereum::new_frontier_test();
@@ -86,6 +90,7 @@ fn make_spec(chain: &BlockChain) -> Spec {
 struct EthTester {
 	client: Arc<Client>,
 	_miner: Arc<MinerService>,
+	_snapshot: Arc<TestSnapshotService>,
 	accounts: Arc<AccountProvider>,
 	handler: IoHandler,
 }
@@ -112,6 +117,7 @@ impl EthTester {
 		let dir = RandomTempPath::new();
 		let account_provider = account_provider();
 		let miner_service = miner_service(&spec, account_provider.clone());
+		let snapshot_service = snapshot_service();
 
 		let db_config = ::util::kvdb::DatabaseConfig::with_columns(::ethcore::db::NUM_COLUMNS);
 		let client = Client::new(
@@ -127,13 +133,14 @@ impl EthTester {
 
 		let eth_client = EthClient::new(
 			&client,
+			&snapshot_service,
 			&sync_provider,
 			&account_provider,
 			&miner_service,
 			&external_miner,
 			Default::default(),
 		);
-		let eth_sign = EthSigningUnsafeClient::new(
+		let eth_sign = SigningUnsafeClient::new(
 			&client,
 			&account_provider,
 			&miner_service
@@ -145,6 +152,7 @@ impl EthTester {
 
 		EthTester {
 			_miner: miner_service,
+			_snapshot: snapshot_service,
 			client: client,
 			accounts: account_provider,
 			handler: handler,

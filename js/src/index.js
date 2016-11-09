@@ -31,7 +31,7 @@ import ContractInstances from './contracts';
 
 import { initStore } from './redux';
 import { ContextProvider, muiTheme } from './ui';
-import { Accounts, Account, Addresses, Address, Application, Contract, Contracts, Dapp, Dapps, Settings, SettingsBackground, SettingsProxy, SettingsViews, Signer, Status } from './views';
+import { Accounts, Account, Addresses, Address, Application, Contract, Contracts, Dapp, Dapps, Settings, SettingsBackground, SettingsParity, SettingsProxy, SettingsViews, Signer, Status } from './views';
 
 import { setApi } from './redux/providers/apiActions';
 
@@ -39,7 +39,6 @@ import './environment';
 
 import '../assets/fonts/Roboto/font.css';
 import '../assets/fonts/RobotoMono/font.css';
-import '../assets/images/parity.ico';
 
 import styles from './reset.css';
 import './index.html';
@@ -60,6 +59,8 @@ const store = initStore(api);
 store.dispatch({ type: 'initAll', api });
 store.dispatch(setApi(api));
 
+window.secureApi = api;
+
 const routerHistory = useRouterHistory(createHashHistory)({});
 
 ReactDOM.render(
@@ -73,13 +74,14 @@ ReactDOM.render(
         <Route path='addresses' component={ Addresses } />
         <Route path='address/:address' component={ Address } />
         <Route path='apps' component={ Dapps } />
-        <Route path='app/:type/:name' component={ Dapp } />
+        <Route path='app/:id' component={ Dapp } />
         <Route path='contracts' component={ Contracts } />
         <Route path='contract/:address' component={ Contract } />
         <Route path='settings' component={ Settings }>
           <Route path='background' component={ SettingsBackground } />
           <Route path='proxy' component={ SettingsProxy } />
           <Route path='views' component={ SettingsViews } />
+          <Route path='parity' component={ SettingsParity } />
         </Route>
         <Route path='signer' component={ Signer } />
         <Route path='status' component={ Status } />

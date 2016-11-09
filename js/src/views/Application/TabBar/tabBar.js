@@ -23,7 +23,7 @@ import { Tabs, Tab } from 'material-ui/Tabs';
 import { Badge, Tooltip } from '../../../ui';
 
 import styles from './tabBar.css';
-import imagesEthcoreBlock from '../../../../assets/images/ethcore-block.png';
+import imagesEthcoreBlock from '../../../../assets/images/parity-logo-white-no-text.svg';
 
 const TABMAP = {
   accounts: 'account',
@@ -64,7 +64,6 @@ class TabBar extends Component {
       <ToolbarGroup>
         <div className={ styles.logo }>
           <img src={ imagesEthcoreBlock } />
-          <div>Parity</div>
         </div>
       </ToolbarGroup>
     );
@@ -150,15 +149,15 @@ class TabBar extends Component {
   }
 
   renderStatusLabel = (label) => {
-    const { isTest, netChain } = this.props;
-    const bubble = (
-      <Badge
-        color={ isTest ? 'red' : 'default' }
-        className={ styles.labelBubble }
-        value={ isTest ? 'TEST' : netChain } />
-      );
+    // const { isTest, netChain } = this.props;
+    // const bubble = (
+    //   <Badge
+    //     color={ isTest ? 'red' : 'default' }
+    //     className={ styles.labelBubble }
+    //     value={ isTest ? 'TEST' : netChain } />
+    //   );
 
-    return this.renderLabel(label, bubble);
+    return this.renderLabel(label, null);
   }
 
   onActivate = (activeRoute) => {

@@ -32,7 +32,8 @@ use node_table::NodeId;
 use stats::NetworkStats;
 use time;
 
-const PING_TIMEOUT_SEC: u64 = 65;
+// Timeout must be less than (interval - 1).
+const PING_TIMEOUT_SEC: u64 = 15;
 const PING_INTERVAL_SEC: u64 = 30;
 
 /// Peer session over encrypted connection.
@@ -388,8 +389,9 @@ impl Session {
 				Ok(SessionData::Continue)
 			},
 			PACKET_PONG => {
-				self.pong_time_ns = Some(time::precise_time_ns());
-				self.info.ping_ms = Some((self.pong_time_ns.unwrap() - self.ping_time_ns) / 1000_000);
+				let time = time::precise_time_ns();
+				self.pong_time_ns = Some(time);
+				self.info.ping_ms = Some((time - self.ping_time_ns) / 1000_000);
 				Ok(SessionData::Continue)
 			},
 			PACKET_GET_PEERS => Ok(SessionData::None), //TODO;
