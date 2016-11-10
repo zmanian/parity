@@ -128,12 +128,12 @@ impl<S> Stack<S> for ShareableStack<S> {
 	}
 
 	fn peek(&self, no_from_top: usize) -> &S {
-		assert!(self.has(no_from_top), "peek asked for more items than exist.");
+		debug_assert!(self.has(no_from_top), "peek asked for more items than exist.");
 		&self.stack.stack[self.stack.size() - no_from_top - 1]
 	}
 
 	fn swap_with_top(&mut self, no_from_top: usize) {
-		assert!(self.has(no_from_top), "swap_with_top asked for more items than exist.");
+		debug_assert!(self.has(no_from_top), "swap_with_top asked for more items than exist.");
 		self.stack.swap_with_top(no_from_top);
 	}
 
@@ -142,12 +142,12 @@ impl<S> Stack<S> for ShareableStack<S> {
 	}
 
 	fn pop_back(&mut self) -> S {
-		assert!(self.has(1), "Tried to pop from empty stack.");
+		debug_assert!(self.has(1), "Tried to pop from empty stack.");
 		self.stack.pop_back()
 	}
 
 	fn pop_n(&mut self, no_of_elems: usize) -> &[S] {
-		assert!(self.has(no_of_elems), "Tried to pop_n more then there is on stack.");
+		debug_assert!(self.has(no_of_elems), "Tried to pop_n more then there is on stack.");
 		self.stack.pop_n(no_of_elems)
 	}
 
@@ -160,7 +160,7 @@ impl<S> Stack<S> for ShareableStack<S> {
 	}
 
 	fn peek_top(&self, no_from_top: usize) -> &[S] {
-		assert!(self.has(no_from_top), "peek_top asked for more items than exist.");
+		debug_assert!(self.has(no_from_top), "peek_top asked for more items than exist.");
 		self.stack.peek_top(no_from_top)
 	}
 }
