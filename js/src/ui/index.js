@@ -23,6 +23,7 @@ import Badge from './Badge';
 import Balance from './Balance';
 import BlockStatus from './BlockStatus';
 import Button from './Button';
+import Certifications from './Certifications';
 import ConfirmDialog from './ConfirmDialog';
 import Container, { Title as ContainerTitle } from './Container';
 import ContextProvider from './ContextProvider';
@@ -53,6 +54,7 @@ export {
   Balance,
   BlockStatus,
   Button,
+  Certifications,
   ConfirmDialog,
   Container,
   ContainerTitle,
