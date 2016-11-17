@@ -20,12 +20,13 @@ import sinon from 'sinon';
 import { TEST_HTTP_URL, mockHttp } from '../../../test/mockRpc';
 
 import Abi from '../../abi';
+import { sha3 } from '../util/sha3';
 
 import Api from '../api';
 import Contract from './contract';
 import { isInstanceOf, isFunction } from '../util/types';
 
-const transport = new Api.Transport.Http(TEST_HTTP_URL);
+const transport = new Api.Transport.Http(TEST_HTTP_URL, -1);
 const eth = new Api(transport);
 
 describe('api/contract/Contract', () => {
@@ -113,25 +114,18 @@ describe('api/contract/Contract', () => {
       ]);
       contract.at('6789');
 
-      expect(Object.keys(contract.instance)).to.deep.equal(['Drained', 'balanceOf', 'address']);
+      expect(Object.keys(contract.instance)).to.deep.equal([
+        'Drained',
+        /^(?:0x)(.+)$/.exec(sha3('Drained(uint256)'))[1],
+        'balanceOf',
+        /^(?:0x)(.+)$/.exec(sha3('balanceOf(address)'))[1].substr(0, 8),
+        'address'
+      ]);
       expect(contract.address).to.equal('6789');
     });
   });
 
   describe('parseTransactionEvents', () => {
-    it('checks for unmatched signatures', () => {
-      const contract = new Contract(eth, [{ anonymous: false, name: 'Message', type: 'event' }]);
-      expect(() => contract.parseTransactionEvents({
-        logs: [{
-          data: '0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000063cf90d3f0410092fc0fca41846f5962239791950000000000000000000000000000000000000000000000000000000056e6c85f0000000000000000000000000000000000000000000000000001000000004fcd00000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000000d706f7374286d6573736167652900000000000000000000000000000000000000',
-          topics: [
-            '0x954ba6c157daf8a26539574ffa64203c044691aa57251af95f4b48d85ec00dd5',
-            '0x0000000000000000000000000000000000000000000000000001000000004fe0'
-          ]
-        }]
-      })).to.throw(/event matching signature/);
-    });
-
     it('parses a transaction log into the data', () => {
       const contract = new Contract(eth, [
         {

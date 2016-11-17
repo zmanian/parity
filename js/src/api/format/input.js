@@ -93,6 +93,10 @@ export function inFilter (options) {
 }
 
 export function inHex (str) {
+  if (str && str.toString) {
+    str = str.toString(16);
+  }
+
   if (str && str.substr(0, 2) === '0x') {
     return str.toLowerCase();
   }
@@ -161,4 +165,12 @@ export function inTraceFilter (filterObject) {
   }
 
   return filterObject;
+}
+
+export function inTraceType (whatTrace) {
+  if (isString(whatTrace)) {
+    return [whatTrace];
+  }
+
+  return whatTrace;
 }

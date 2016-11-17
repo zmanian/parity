@@ -19,13 +19,15 @@ import Api from './api';
 const sysuiToken = window.localStorage.getItem('sysuiToken');
 
 export default class SecureApi extends Api {
-  constructor (url) {
+  constructor (url, nextToken) {
     super(new Api.Transport.Ws(url, sysuiToken));
 
     this._isConnecting = true;
     this._connectState = sysuiToken === 'initial' ? 1 : 0;
     this._needsToken = false;
+    this._nextToken = nextToken;
     this._dappsPort = 8080;
+    this._dappsInterface = null;
     this._signerPort = 8180;
 
     console.log('SecureApi:constructor', sysuiToken);
@@ -56,7 +58,11 @@ export default class SecureApi extends Api {
         if (isConnected) {
           return this.connectSuccess();
         } else if (lastError) {
-          this.updateToken('initial', 1);
+          const nextToken = this._nextToken || 'initial';
+          const nextState = this._nextToken ? 0 : 1;
+
+          this._nextToken = null;
+          this.updateToken(nextToken, nextState);
         }
         break;
 
@@ -100,10 +106,12 @@ export default class SecureApi extends Api {
     Promise
       .all([
         this.parity.dappsPort(),
+        this.parity.dappsInterface(),
         this.parity.signerPort()
       ])
-      .then(([dappsPort, signerPort]) => {
+      .then(([dappsPort, dappsInterface, signerPort]) => {
         this._dappsPort = dappsPort.toNumber();
+        this._dappsInterface = dappsInterface;
         this._signerPort = signerPort.toNumber();
       });
 
@@ -122,7 +130,17 @@ export default class SecureApi extends Api {
   }
 
   get dappsUrl () {
-    return `http://${window.location.hostname}:${this._dappsPort}`;
+    let hostname;
+
+    if (window.location.hostname === 'home.parity') {
+      hostname = 'dapps.parity';
+    } else if (!this._dappsInterface || this._dappsInterface === '0.0.0.0') {
+      hostname = window.location.hostname;
+    } else {
+      hostname = this._dappsInterface;
+    }
+
+    return `http://${hostname}:${this._dappsPort}`;
   }
 
   get signerPort () {

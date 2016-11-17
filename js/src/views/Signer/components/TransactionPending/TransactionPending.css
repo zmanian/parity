@@ -19,7 +19,9 @@
 }
 
 .transactionDetails {
-  margin-right: 321px;
+  padding-right: 321px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .mainContainer {
@@ -32,7 +34,7 @@
 
 .mainContainer > * {
   vertical-align: middle;
-  min-height: 120px;
+  min-height: 190px;
 }
 
 .inputs {

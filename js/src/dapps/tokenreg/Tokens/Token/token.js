@@ -57,13 +57,27 @@ export default class Token extends Component {
     isLoading: PropTypes.bool,
     isPending: PropTypes.bool,
     isTokenOwner: PropTypes.bool.isRequired,
+    isContractOwner: PropTypes.bool,
 
     fullWidth: PropTypes.bool
   };
 
-  state = {
-    metaKeyIndex: 0
+  static defaultProps = {
+    isContractOwner: false
   };
+
+  state = {
+    metaKeyIndex: 0,
+    showMeta: false
+  };
+
+  shouldComponentUpdate (nextProps) {
+    if (nextProps.isLoading && this.props.isLoading) {
+      return false;
+    }
+
+    return true;
+  }
 
   render () {
     const { isLoading, fullWidth } = this.props;
@@ -151,8 +165,8 @@ export default class Token extends Component {
     if (!base || base < 0) return null;
     return (
       <Chip
-        value={ base.toString() }
-        label='Base' />
+        value={ Math.log10(base).toString() }
+        label='Decimals' />
     );
   }
 
@@ -220,7 +234,7 @@ export default class Token extends Component {
   }
 
   renderUnregister () {
-    if (!this.props.isTokenOwner) {
+    if (!this.props.isContractOwner) {
       return null;
     }
 
@@ -236,7 +250,12 @@ export default class Token extends Component {
   }
 
   renderMeta (meta) {
-    const isMetaLoading = this.props.isMetaLoading;
+    const { isMetaLoading } = this.props;
+    const { showMeta } = this.state;
+
+    if (!showMeta) {
+      return null;
+    }
 
     if (isMetaLoading) {
       return (<div>
@@ -330,6 +349,7 @@ export default class Token extends Component {
     const key = metaDataKeys[keyIndex].value;
     const index = this.props.index;
 
+    this.setState({ showMeta: true });
     this.props.handleMetaLookup(index, key);
   }
 
