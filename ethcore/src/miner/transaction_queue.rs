@@ -488,6 +488,8 @@ pub struct TransactionQueue {
 	by_hash: HashMap<H256, VerifiedTransaction>,
 	/// Last nonce of transaction in current (to quickly check next expected transaction)
 	last_nonces: HashMap<Address, U256>,
+	/// The allowed network id of incoming transactions.
+	allowed_network_id: Option<u8>,
 }
 
 impl Default for TransactionQueue {
@@ -529,6 +531,7 @@ impl TransactionQueue {
 			future: future,
 			by_hash: HashMap::new(),
 			last_nonces: HashMap::new(),
+			allowed_network_id: None,
 		}
 	}
 
@@ -585,6 +588,10 @@ impl TransactionQueue {
 	/// Any transaction already imported to the queue is not affected.
 	pub fn set_tx_gas_limit(&mut self, limit: U256) {
 		self.tx_gas_limit = limit;
+	}
+
+	pub fn set_allowed_network_id(&mut self, network_id: Option<u8>) {
+		self.allowed_network_id = network_id;
 	}
 
 	/// Returns current status for this queue
@@ -671,6 +678,11 @@ impl TransactionQueue {
 
 		// Verify signature
 		try!(tx.check_low_s());
+		match (tx.network_id(), self.allowed_network_id) {
+			(Some(_), None) => return Err(TransactionError::InvalidNetworkId.into()),
+			(Some(x), Some(y)) if x != y => return Err(TransactionError::InvalidNetworkId.into()),
+			_ => {}
+		}
 
 		let vtx = try!(VerifiedTransaction::new(tx, origin));
 		let client_account = fetch_account(&vtx.sender());

@@ -112,7 +112,7 @@ pub trait Engine : Sync + Send {
 	/// Verify a particular transaction is valid.
 	fn verify_transaction(&self, _t: &SignedTransaction, _header: &Header) -> Result<(), Error> { Ok(()) }
 
-	/// The network ID that transactions should be signed with.
+	/// The network ID that transactions should be signed with and are allowed to have.
 	fn signing_network_id(&self, _env_info: &EnvInfo) -> Option<u8> { None }
 
 	/// Verify the seal of a block. This is an auxilliary method that actually just calls other `verify_` methods

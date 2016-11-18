@@ -315,6 +315,11 @@ impl Miner {
 			trace!(target: "miner", "prepare_block: done recalibration.");
 		}
 
+		{
+			
+			self.transaction_queue.lock().set_allowed_network_id();
+		}
+
 		let _timer = PerfTimer::new("prepare_block");
 		let (transactions, mut open_block, original_work_hash) = {
 			let transactions = {self.transaction_queue.lock().top_transactions()};
@@ -352,6 +357,26 @@ impl Miner {
 		let mut transactions_to_penalize = HashSet::new();
 		let block_number = open_block.block().fields().header.number();
 
+		{
+			let block = open_block.block();
+
+			// TODO: merge this code with client.rs's fn call somwhow.
+			let header = block.header();
+			let last_hashes = Arc::new(chain.last_hashes());
+			let env_info = EnvInfo {
+				number: header.number(),
+				author: *header.author(),
+				timestamp: header.timestamp(),
+				difficulty: *header.difficulty(),
+				last_hashes: last_hashes,
+				gas_used: U256::zero(),
+				gas_limit: U256::max_value(),
+			};
+
+			// TODO: move to constructor once we're done transitioning to EIP-155.
+			self.transaction_queue.lock().set_allowed_network_id(self.engine.signing_network_id(&env_info));
+		}
+		
 		// TODO Push new uncles too.
 		for tx in transactions {
 			let hash = tx.hash();
