@@ -590,6 +590,7 @@ impl TransactionQueue {
 		self.tx_gas_limit = limit;
 	}
 
+	/// Update the network id that's allowed into the queue (if any).
 	pub fn set_allowed_network_id(&mut self, network_id: Option<u8>) {
 		self.allowed_network_id = network_id;
 	}

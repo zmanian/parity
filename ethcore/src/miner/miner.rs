@@ -315,11 +315,6 @@ impl Miner {
 			trace!(target: "miner", "prepare_block: done recalibration.");
 		}
 
-		{
-			
-			self.transaction_queue.lock().set_allowed_network_id();
-		}
-
 		let _timer = PerfTimer::new("prepare_block");
 		let (transactions, mut open_block, original_work_hash) = {
 			let transactions = {self.transaction_queue.lock().top_transactions()};
