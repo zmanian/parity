@@ -31,6 +31,7 @@ import Header from './Header';
 import Transactions from './Transactions';
 
 import VerificationStore from '../../modals/SMSVerification/store';
+import { fetchCertifications } from '../../redux/providers/certifications/actions';
 
 import styles from './account.css';
 
@@ -44,7 +45,9 @@ class Account extends Component {
     accounts: PropTypes.object,
     balances: PropTypes.object,
     images: PropTypes.object.isRequired,
-    isTest: PropTypes.bool
+    isTest: PropTypes.bool,
+    certifications: PropTypes.object.isRequired,
+    fetchCertifications: PropTypes.func.isRequired
   }
 
   propName = null
@@ -58,6 +61,10 @@ class Account extends Component {
     showPasswordDialog: false
   }
 
+  componentWillMount () {
+    this.props.fetchCertifications(this.props.params.address);
+  }
+
   componentDidMount () {
     const { api } = this.context;
     const { address } = this.props.params;
@@ -67,11 +74,12 @@ class Account extends Component {
   }
 
   render () {
-    const { accounts, balances, isTest } = this.props;
+    const { accounts, balances, certifications, isTest } = this.props;
     const { address } = this.props.params;
 
     const account = (accounts || {})[address];
     const balance = (balances || {})[address];
+    const certificationsOfAccount = certifications[address] || [];
 
     if (!account) {
       return null;
@@ -89,7 +97,9 @@ class Account extends Component {
           <Header
             isTest={ isTest }
             account={ account }
-            balance={ balance } />
+            balance={ balance }
+            certifications={ certificationsOfAccount }
+          />
           <Transactions
             accounts={ accounts }
             address={ address } />
@@ -276,19 +286,20 @@ class Account extends Component {
 function mapStateToProps (state) {
   const { accounts } = state.personal;
   const { balances } = state.balances;
-  const { images } = state;
+  const { certifications, images } = state;
   const { isTest } = state.nodeStatus;
 
   return {
     isTest,
     accounts,
     balances,
+    certifications,
     images
   };
 }
 
 function mapDispatchToProps (dispatch) {
-  return bindActionCreators({}, dispatch);
+  return bindActionCreators({ fetchCertifications }, dispatch);
 }
 
 export default connect(
