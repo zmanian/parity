@@ -48,6 +48,7 @@ class Account extends Component {
 
     params: PropTypes.object,
     accounts: PropTypes.object,
+    isTestnet: PropTypes.bool,
     balances: PropTypes.object,
     certifications: PropTypes.object.isRequired,
     fetchCertifications: PropTypes.func.isRequired
@@ -72,8 +73,9 @@ class Account extends Component {
   componentDidMount () {
     const { api } = this.context;
     const { address } = this.props.params;
+    const { isTestnet } = this.props;
 
-    const verificationStore = new VerificationStore(api, address);
+    const verificationStore = new VerificationStore(api, address, isTestnet);
     this.setState({ verificationStore });
     this.setVisibleAccounts();
   }
@@ -336,11 +338,13 @@ class Account extends Component {
 
 function mapStateToProps (state) {
   const { accounts } = state.personal;
+  const { isTest } = state.nodeStatus;
   const { balances } = state.balances;
   const { certifications, images } = state;
 
   return {
     accounts,
+    isTestnet: isTest,
     balances,
     certifications,
     images
