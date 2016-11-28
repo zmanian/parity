@@ -25,6 +25,8 @@ import ContentClear from 'material-ui/svg-icons/content/clear';
 
 import { newError } from '../../redux/actions';
 import { fetchCertifications } from '../../redux/providers/certifications/actions';
+import { setVisibleAccounts } from '../../redux/providers/personalActions';
+
 import { EditMeta, ExecuteContract } from '../../modals';
 import { Actionbar, Button, Page, Modal, Editor } from '../../ui';
 
@@ -42,6 +44,8 @@ class Contract extends Component {
   }
 
   static propTypes = {
+    setVisibleAccounts: PropTypes.func.isRequired,
+
     accounts: PropTypes.object,
     balances: PropTypes.object,
     contracts: PropTypes.object,
@@ -75,21 +79,29 @@ class Contract extends Component {
 
     this.attachContract(this.props);
     this.setBaseAccount(this.props);
+    this.setVisibleAccounts();
 
     api
       .subscribe('eth_blockNumber', this.queryContract)
       .then(blockSubscriptionId => this.setState({ blockSubscriptionId }));
   }
 
-  componentWillReceiveProps (newProps) {
-    const { accounts, contracts } = newProps;
+  componentWillReceiveProps (nextProps) {
+    const { accounts, contracts } = nextProps;
 
     if (Object.keys(contracts).length !== Object.keys(this.props.contracts).length) {
-      this.attachContract(newProps);
+      this.attachContract(nextProps);
     }
 
     if (Object.keys(accounts).length !== Object.keys(this.props.accounts).length) {
-      this.setBaseAccount(newProps);
+      this.setBaseAccount(nextProps);
+    }
+
+    const prevAddress = this.props.params.address;
+    const nextAddress = nextProps.params.address;
+
+    if (prevAddress !== nextAddress) {
+      this.setVisibleAccounts(nextProps);
     }
   }
 
@@ -99,6 +111,13 @@ class Contract extends Component {
 
     api.unsubscribe(blockSubscriptionId);
     contract.unsubscribe(subscriptionId);
+    this.props.setVisibleAccounts([]);
+  }
+
+  setVisibleAccounts (props = this.props) {
+    const { params, setVisibleAccounts } = props;
+    const addresses = [ params.address ];
+    setVisibleAccounts(addresses);
   }
 
   render () {
@@ -120,7 +139,6 @@ class Contract extends Component {
         { this.renderExecuteDialog() }
         <Page>
           <Header
-            isTest={ isTest }
             account={ account }
             balance={ balance }
             certifications={ certificationsOfAccount }
@@ -442,7 +460,11 @@ function mapStateToProps (state) {
 }
 
 function mapDispatchToProps (dispatch) {
-  return bindActionCreators({ newError, fetchCertifications }, dispatch);
+  return bindActionCreators({
+    newError,
+    setVisibleAccounts,
+    fetchCertifications
+  }, dispatch);
 }
 
 export default connect(

@@ -30,20 +30,7 @@ export default class Header extends Component {
   static propTypes = {
     account: PropTypes.object,
     balance: PropTypes.object,
-    certifications: PropTypes.array.isRequired,
-    isTest: PropTypes.bool
-  }
-
-  state = {
-    name: null
-  }
-
-  componentWillMount () {
-    this.setName();
-  }
-
-  componentWillReceiveProps () {
-    this.setName();
+    certifications: PropTypes.array.isRequired
   }
 
   render () {
@@ -94,42 +81,18 @@ export default class Header extends Component {
   }
 
   renderTxCount () {
-    const { isTest, balance } = this.props;
+    const { balance } = this.props;
 
     if (!balance) {
       return null;
     }
 
-    const txCount = balance.txCount.sub(isTest ? 0x100000 : 0);
+    const { txCount } = balance;
 
     return (
       <div className={ styles.infoline }>
         { txCount.toFormat() } outgoing transactions
       </div>
     );
-  }
-
-  onSubmitName = (name) => {
-    const { api } = this.context;
-    const { account } = this.props;
-
-    this.setState({ name }, () => {
-      api.parity
-        .setAccountName(account.address, name)
-        .catch((error) => {
-          console.error(error);
-        });
-    });
-  }
-
-  setName () {
-    const { account } = this.props;
-
-    if (account && account.name !== this.propName) {
-      this.propName = account.name;
-      this.setState({
-        name: account.name
-      });
-    }
   }
 }
