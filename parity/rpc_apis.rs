@@ -210,7 +210,8 @@ pub fn setup_rpc<T: Extendable>(server: T, deps: Arc<Dependencies>, apis: ApiSet
 				add_signing_methods!(EthSigning, server, deps);
 			},
 			Api::Personal => {
-				server.add_delegate(PersonalClient::new(&deps.secret_store, &deps.client, &deps.miner, deps.geth_compatibility).to_delegate());
+				let allow_perm_unlock = deps.geth_compatibility || deps.client.engine.seals_internally;
+				server.add_delegate(PersonalClient::new(&deps.secret_store, &deps.client, &deps.miner, allow_perm_unlock).to_delegate());
 			},
 			Api::Signer => {
 				server.add_delegate(SignerClient::new(&deps.secret_store, &deps.client, &deps.miner, &deps.signer_service).to_delegate());
