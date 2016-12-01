@@ -17,9 +17,7 @@
 import React, { Component, PropTypes } from 'react';
 
 import Form, { Input } from '../../../ui/Form';
-import GasPriceSelector from '../GasPriceSelector';
-
-import styles from '../transfer.css';
+import GasAdjustment from '../GasAdjustment';
 
 export default class Extras extends Component {
   static propTypes = {
@@ -44,68 +42,22 @@ export default class Extras extends Component {
   render () {
     const { gas, gasPrice, gasError, gasEst, gasPriceDefault, gasPriceError, gasPriceHistogram, total, totalError } = this.props;
 
-    const gasLabel = `gas amount (estimated: ${gasEst})`;
-    const priceLabel = `gas price (current: ${gasPriceDefault})`;
-
     return (
       <Form>
-
         { this.renderData() }
-
-        <div className={ styles.columns }>
-          <div style={ { flex: 65 } }>
-            <GasPriceSelector
-              gasPriceHistogram={ gasPriceHistogram }
-              gasPrice={ gasPrice }
-              onChange={ this.onEditGasPrice }
-            />
-          </div>
-
-          <div
-            className={ styles.row }
-            style={ {
-              flex: 35, paddingLeft: '1rem',
-              justifyContent: 'space-around',
-              paddingBottom: 12
-            } }
-          >
-            <div className={ styles.row }>
-              <Input
-                label={ gasLabel }
-                hint='the amount of gas to use for the transaction'
-                error={ gasError }
-                value={ gas }
-                onChange={ this.onEditGas } />
-
-              <Input
-                label={ priceLabel }
-                hint='the price of gas to use for the transaction'
-                error={ gasPriceError }
-                value={ (gasPrice || '').toString() }
-                onChange={ this.onEditGasPrice } />
-            </div>
-
-            <div className={ styles.row }>
-              <Input
-                disabled
-                label='total transaction amount'
-                hint='the total amount of the transaction'
-                error={ totalError }
-                value={ `${total} ETH` } />
-            </div>
-          </div>
-        </div>
-
-        <div>
-          <p className={ styles.gasPriceDesc }>
-            You can choose the gas price based on the
-            distribution of recent included transactions' gas prices.
-            The lower the gas price is, the cheaper the transaction will
-            be. The higher the gas price is, the faster it should
-            get mined by the network.
-          </p>
-        </div>
-
+        <GasAdjustment
+          amount={ gas }
+          amountEstimate={ gasEst }
+          amountError={ gasError }
+          price={ gasPrice }
+          priceDefault={ gasPriceDefault }
+          priceError={ gasPriceError }
+          priceHistogram={ gasPriceHistogram }
+          total={ total }
+          totalError={ totalError }
+          onSetAmount={ this.onSetGas }
+          onSetPrice={ this.onSetGasPrice }
+        />
       </Form>
     );
   }
@@ -129,12 +81,12 @@ export default class Extras extends Component {
     );
   }
 
-  onEditGas = (event) => {
-    this.props.onChange('gas', event.target.value);
+  onSetGas = (gas) => {
+    this.props.onChange('gas', gas);
   }
 
-  onEditGasPrice = (event, value) => {
-    this.props.onChange('gasPrice', value);
+  onSetGasPrice = (gasPrice) => {
+    this.props.onChange('gasPrice', gasPrice);
   }
 
   onEditData = (event) => {

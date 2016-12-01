@@ -29,10 +29,7 @@ import {
 import Slider from 'material-ui/Slider';
 import BigNumber from 'bignumber.js';
 
-import componentStyles from './gasPriceSelector.css';
-import mainStyles from '../transfer.css';
-
-const styles = Object.assign({}, mainStyles, componentStyles);
+import styles from './gasPriceSelector.css';
 
 const COLORS = {
   default: 'rgba(255, 99, 132, 0.2)',
@@ -287,21 +284,20 @@ export default class GasPriceSelector extends Component {
   renderSlider () {
     const { sliderValue } = this.state;
 
-    return (<div className={ styles.columns }>
+    return (
       <Slider
         min={ 0 }
         max={ 1 }
         value={ sliderValue }
         onChange={ this.onEditGasPriceSlider }
         style={ {
-          flex: 1,
-          padding: '0 0.3em'
+          flex: 1
         } }
         sliderStyle={ {
           marginBottom: 12
         } }
       />
-    </div>);
+    );
   }
 
   renderChart () {
@@ -316,8 +312,8 @@ export default class GasPriceSelector extends Component {
     const countIndex = Math.max(0, Math.min(selectedIndex, gasPriceHistogram.counts.length - 1));
     const selectedCount = countModifier(gasPriceHistogram.counts[countIndex]);
 
-    return (<div className={ styles.columns }>
-      <div style={ { flex: 1, height } }>
+    return (
+      <div className={ styles.container } style={ { height } }>
         <div className={ styles.chart }>
           <ResponsiveContainer
             height={ height }
@@ -394,7 +390,7 @@ export default class GasPriceSelector extends Component {
           </ResponsiveContainer>
         </div>
       </div>
-    </div>);
+    );
   }
 
   renderCustomCursor = () => {

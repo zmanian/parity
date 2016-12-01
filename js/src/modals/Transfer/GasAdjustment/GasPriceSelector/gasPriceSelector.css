@@ -15,3 +15,15 @@
 /* along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+.container {
+  position: relative;
+}
+
+.chart {
+  position: absolute;
+  width: 100%;
+}
+
+.gasPriceDesc {
+  font-size: 0.9em;
+}
