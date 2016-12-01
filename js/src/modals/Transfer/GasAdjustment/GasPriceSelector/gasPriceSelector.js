@@ -239,7 +239,8 @@ export default class GasPriceSelector extends Component {
     gasPrice: PropTypes.oneOfType([
       PropTypes.string,
       PropTypes.object
-    ])
+    ]),
+    height: PropTypes.number
   }
 
   state = {
@@ -303,12 +304,12 @@ export default class GasPriceSelector extends Component {
   renderChart () {
     const { gasPriceHistogram } = this.props;
     const { chartData, sliderValue, selectedIndex } = this.state;
+    const height = this.props.height || 300;
 
     if (chartData.values.length === 0) {
       return null;
     }
 
-    const height = 300;
     const countIndex = Math.max(0, Math.min(selectedIndex, gasPriceHistogram.counts.length - 1));
     const selectedCount = countModifier(gasPriceHistogram.counts[countIndex]);
 

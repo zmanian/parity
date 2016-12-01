@@ -33,14 +33,23 @@ export default class GasAdjustment extends Component {
     priceDefault: PropTypes.string.isRequired,
     priceError: PropTypes.string,
     priceHistogram: PropTypes.object.isRequired,
+    priceChartHeight: PropTypes.number,
     total: PropTypes.string.isRequired,
     totalError: PropTypes.string,
     onSetAmount: PropTypes.func.isRequired,
     onSetPrice: PropTypes.func.isRequired
   }
 
+  static defaultProps = {
+    priceChartHeight: 200
+  }
+
   render () {
-    const { amount, amountError, amountEstimate, price, priceDefault, priceError, priceHistogram, total, totalError } = this.props;
+    const {
+      amount, amountError, amountEstimate,
+      price, priceDefault, priceError, priceHistogram, priceChartHeight,
+      total, totalError
+    } = this.props;
 
     return (
       <div className={ styles.container }>
@@ -49,6 +58,7 @@ export default class GasAdjustment extends Component {
             <GasPriceSelector
               gasPriceHistogram={ priceHistogram }
               gasPrice={ price }
+              height={ priceChartHeight }
               onChange={ this.onSetPrice }
             />
           </div>
