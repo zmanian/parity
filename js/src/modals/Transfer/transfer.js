@@ -63,11 +63,11 @@ class Transfer extends Component {
     data: '',
     dataError: null,
     extras: false,
-    gas: DEFAULT_GAS,
-    gasEst: '0',
+    gas: DEFAULT_GAS + 0,
+    gasEst: 0,
     gasError: null,
     gasLimitError: null,
-    gasPrice: DEFAULT_GASPRICE,
+    gasPrice: DEFAULT_GASPRICE + 0,
     gasPriceHistogram: {},
     gasPriceError: null,
     recipient: '',
@@ -566,7 +566,7 @@ class Transfer extends Component {
   recalculateGas = () => {
     if (!this.isValid()) {
       this.setState({
-        gas: '0'
+        gas: 0
       }, this.recalculate);
       return;
     }
@@ -591,8 +591,8 @@ class Transfer extends Component {
       }
 
       this.setState({
-        gas: gas.toFixed(0),
-        gasEst: gasEst.toFormat(),
+        gas: gas,
+        gasEst: gasEst,
         gasLimitError
       }, this.recalculate);
     })
@@ -662,8 +662,8 @@ class Transfer extends Component {
       ])
       .then(([gasPriceHistogram, gasPrice]) => {
         this.setState({
-          gasPrice: gasPrice.toString(),
-          gasPriceDefault: gasPrice.toFormat(),
+          gasPrice: gasPrice,
+          gasPriceDefault: gasPrice,
           gasPriceHistogram
         }, this.recalculate);
       })

@@ -15,6 +15,7 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 import React, { Component, PropTypes } from 'react';
+import BigNumber from 'bignumber.js';
 
 import Form, { Input } from '../../../ui/Form';
 import GasAdjustment from '../GasAdjustment';
@@ -24,14 +25,11 @@ export default class Extras extends Component {
     isEth: PropTypes.bool,
     data: PropTypes.string,
     dataError: PropTypes.string,
-    gas: PropTypes.string,
-    gasEst: PropTypes.string,
+    gas: PropTypes.instanceOf(BigNumber).isRequired,
+    gasEst: PropTypes.instanceOf(BigNumber).isRequired,
     gasError: PropTypes.string,
-    gasPrice: PropTypes.oneOfType([
-      PropTypes.string,
-      PropTypes.object
-    ]),
-    gasPriceDefault: PropTypes.string,
+    gasPrice: PropTypes.instanceOf(BigNumber).isRequired,
+    gasPriceDefault: PropTypes.instanceOf(BigNumber).isRequired,
     gasPriceError: PropTypes.string,
     gasPriceHistogram: PropTypes.object,
     total: PropTypes.string,

@@ -15,6 +15,7 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 import React, { Component, PropTypes } from 'react';
+import BigNumber from 'bignumber.js';
 
 import { Input } from '../../../ui/Form';
 import GasPriceSelector from './GasPriceSelector';
@@ -23,14 +24,11 @@ import styles from './gasAdjustment.css';
 
 export default class GasAdjustment extends Component {
   static propTypes = {
-    amount: PropTypes.string.isRequired,
-    amountEstimate: PropTypes.string.isRequired,
+    amount: PropTypes.instanceOf(BigNumber).isRequired,
+    amountEstimate: PropTypes.instanceOf(BigNumber).isRequired,
     amountError: PropTypes.string,
-    price: PropTypes.oneOfType([
-      PropTypes.string,
-      PropTypes.object
-    ]).isRequired,
-    priceDefault: PropTypes.string.isRequired,
+    price: PropTypes.instanceOf(BigNumber).isRequired,
+    priceDefault: PropTypes.instanceOf(BigNumber).isRequired,
     priceError: PropTypes.string,
     priceHistogram: PropTypes.object.isRequired,
     priceChartHeight: PropTypes.number,
@@ -57,7 +55,7 @@ export default class GasAdjustment extends Component {
           <div className={ styles.left }>
             <GasPriceSelector
               gasPriceHistogram={ priceHistogram }
-              gasPrice={ price }
+              gasPrice={ price.toString() }
               height={ priceChartHeight }
               onChange={ this.onSetPrice }
             />
@@ -65,17 +63,17 @@ export default class GasAdjustment extends Component {
 
           <div className={ `${styles.rows} ${styles.right}` }>
             <Input
-              label={ `gas amount (estimated: ${amountEstimate})` }
+              label={ `gas amount (estimated: ${amountEstimate.toFormat(0)})` }
               hint='the amount of gas to use for the transaction'
               error={ amountError }
-              value={ amount }
+              value={ amount.toString() }
               onChange={ this.onSetAmount } />
 
             <Input
-              label={ `gas price (recommended: ${priceDefault})` }
+              label={ `gas price (recommended: ${priceDefault.toFormat(0)})` }
               hint='the price of gas to use for the transaction'
               error={ priceError }
-              value={ (price || '').toString() }
+              value={ price.toString() }
               onChange={ this.onSetPrice } />
 
             <div className={ styles.total }>
@@ -103,10 +101,10 @@ export default class GasAdjustment extends Component {
   }
 
   onSetAmount = (event) => {
-    this.props.onSetAmount(event.target.value);
+    this.props.onSetAmount(new BigNumber(event.target.value));
   }
 
   onSetPrice = (_, value) => {
-    this.props.onSetPrice(value);
+    this.props.onSetPrice(new BigNumber(value));
   }
 }
