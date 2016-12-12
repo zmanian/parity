@@ -16,10 +16,9 @@
 
 import React, { Component, PropTypes } from 'react';
 import { connect } from 'react-redux';
-import { bindActionCreators } from 'redux';
 import ContractIcon from 'material-ui/svg-icons/action/code';
 
-import { createIdentityImg } from '~/api/util/identity';
+import IdentityIconStore from './identityIconStore';
 
 import styles from './identityIcon.css';
 
@@ -29,12 +28,13 @@ class IdentityIcon extends Component {
   }
 
   static propTypes = {
+    image: PropTypes.object.isRequired,
+
     address: PropTypes.string,
     button: PropTypes.bool,
     center: PropTypes.bool,
     className: PropTypes.string,
     inline: PropTypes.bool,
-    images: PropTypes.object.isRequired,
     padded: PropTypes.bool,
     tiny: PropTypes.bool
   }
@@ -44,26 +44,26 @@ class IdentityIcon extends Component {
   }
 
   componentDidMount () {
-    this.updateIcon(this.props.address, this.props.images);
+    this.updateIcon(this.props.address, this.props.image);
   }
 
   componentWillReceiveProps (newProps) {
     const sameAddress = newProps.address === this.props.address;
-    const sameImages = Object.keys(newProps.images).length === Object.keys(this.props.images).length;
+    const sameImages = newProps.image === this.props.image;
 
     if (sameAddress && sameImages) {
       return;
     }
 
-    this.updateIcon(newProps.address, newProps.images);
+    this.updateIcon(newProps.address, newProps.image);
   }
 
-  updateIcon (_address, images) {
+  updateIcon (_address, image) {
     const { api } = this.context;
     const { button, inline, tiny } = this.props;
 
-    if (images[_address]) {
-      this.setState({ iconsrc: `${api.dappsUrl}${images[_address]}` });
+    if (image) {
+      this.setState({ iconsrc: `${api.dappsUrl}${image}` });
       return;
     }
 
@@ -77,7 +77,7 @@ class IdentityIcon extends Component {
     }
 
     this.setState({
-      iconsrc: createIdentityImg(_address, scale)
+      iconsrc: IdentityIconStore.getIcon(_address, scale)
     });
   }
 
@@ -125,17 +125,15 @@ class IdentityIcon extends Component {
   }
 }
 
-function mapStateToProps (state) {
-  const { images } = state;
+function mapStateToProps (iniState) {
+  const { images } = iniState;
 
-  return { images };
-}
-
-function mapDispatchToProps (dispatch) {
-  return bindActionCreators({}, dispatch);
+  return (state, props) => {
+    const image = images[props.address];
+    return { image };
+  };
 }
 
 export default connect(
-  mapStateToProps,
-  mapDispatchToProps
+  mapStateToProps
 )(IdentityIcon);
