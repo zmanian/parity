@@ -76,7 +76,8 @@ export default class Store {
         this._api.parity.setAccountMeta(this.address, {
           description: this.description,
           timestamp: Date.now(),
-          deleted: false
+          deleted: false,
+          contact: true
         })
       ])
       .catch((error) => {

@@ -115,6 +115,7 @@ describe('modals/AddAddress/store', () => {
       it('calls setAccountMeta', () => {
         store.add();
 
+        expect(api.parity.setAccountMeta.firstCall.args[1].contact).to.be.true;
         expect(api.parity.setAccountMeta).to.have.been.called;
       });
 
