@@ -1,6 +1,6 @@
 Parity. Ethereum Client.
   By Wood/Paronyan/Kotewicz/Drwięga/Volf et al.
-  Copyright 2015, 2016 Ethcore (UK) Limited
+  Copyright 2015, 2016 Parity Technologies (UK) Limited
 
 Usage:
   parity [options]
