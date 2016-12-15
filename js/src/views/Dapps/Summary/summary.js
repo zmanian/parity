@@ -16,6 +16,7 @@
 
 import React, { Component, PropTypes } from 'react';
 import { Link } from 'react-router';
+import { isEqual, pick } from 'lodash';
 
 import { Container, ContainerTitle, Tags } from '~/ui';
 
@@ -24,48 +25,61 @@ import styles from './summary.css';
 export default class Summary extends Component {
   static contextTypes = {
     api: React.PropTypes.object
-  }
+  };
 
   static propTypes = {
     app: PropTypes.object.isRequired,
-    children: PropTypes.node
+    className: PropTypes.string
+  };
+
+  static defaultProps = {
+    className: ''
+  };
+
+  shouldComponentUpdate (nextProps) {
+    const keys = [ 'type', 'id', 'name', 'description', 'author', 'version', 'iconUrl', 'image' ];
+
+    return !isEqual(pick(nextProps, keys), pick(this.props, keys));
   }
 
   render () {
-    const { dappsUrl } = this.context.api;
-    const { app } = this.props;
-
-    if (!app) {
-      return null;
-    }
-
-    let image = <div className={ styles.image }>&nbsp;</div>;
-    if (app.type === 'local') {
-      image = <img src={ `${dappsUrl}/${app.id}/${app.iconUrl}` } className={ styles.image } />;
-    } else {
-      image = <img src={ `${dappsUrl}${app.image}` } className={ styles.image } />;
-    }
+    const { app, className } = this.props;
+    const { type, id, name, description, author, version } = app;
 
     return (
-      <Container className={ styles.container }>
-        { image }
-        <Tags tags={ [app.type] } />
-        <div className={ styles.description }>
-          <ContainerTitle
-            className={ styles.title }
-            title={
-              <Link to={ `/app/${app.id}` }>
-                { app.name }
-              </Link>
-            }
-            byline={ app.description }
-          />
-          <div className={ styles.author }>
-            { app.author }, v{ app.version }
+      <div className={ className }>
+        <Container className={ styles.container }>
+          { this.renderImage(app) }
+          <Tags tags={ [type] } />
+          <div className={ styles.description }>
+            <ContainerTitle
+              className={ styles.title }
+              title={
+                <Link to={ `/app/${id}` }>
+                  { name }
+                </Link>
+              }
+              byline={ description }
+            />
+            <div className={ styles.author }>
+              { author }, v{ version }
+            </div>
           </div>
-          { this.props.children }
-        </div>
-      </Container>
+        </Container>
+      </div>
     );
+  }
+
+  renderImage (app) {
+    const { dappsUrl } = this.context.api;
+    const { type, id, iconUrl, image } = app;
+
+    return type === 'local'
+      ? (
+        <img src={ `${dappsUrl}/${id}/${iconUrl}` } className={ styles.image } />
+      )
+      : (
+        <img src={ `${dappsUrl}${image}` } className={ styles.image } />
+      );
   }
 }

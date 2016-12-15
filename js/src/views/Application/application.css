@@ -1,4 +1,4 @@
-/* Copyright 2015, 2016 Ethcore (UK) Ltd.
+/* Copyright 2015, 2016 Ethcore (UK) Ltd.intWasted()
 /* This file is part of Parity.
 /*
 /* Parity is free software: you can redistribute it and/or modify
@@ -23,4 +23,17 @@
 
 .content {
   padding-bottom: 1em;
+}
+
+.background {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  top: 0;
+  z-index: 0;
+}
+
+.content {
+  z-index: 1;
 }

@@ -30,28 +30,46 @@ import styles from './tabBar.css';
 
 class Tab extends Component {
   static propTypes = {
-    children: PropTypes.node,
     pendings: PropTypes.number,
     view: PropTypes.object
   };
 
+  shouldComponentUpdate (nextProps) {
+    return !isEqual(this.props.pendings !== nextProps.pending);
+  }
+
   render () {
-    const { view, children } = this.props;
+    const { view } = this.props;
 
     return (
-      <MUITab
-        icon={ view.icon }
-        label={
-          view.id === 'signer'
-            ? this.renderSignerLabel(view.id)
-            : this.renderLabel(view.id)
-        }>
-        { children }
-      </MUITab>
+      <Link
+        activeClassName={ styles.tabactive }
+        className={ styles.tabLink }
+        to={ view.route }
+      >
+        <MUITab
+          icon={ view.icon }
+          label={ this.renderLabel(view.id) }
+        >
+          { this.renderBody(view) }
+        </MUITab>
+      </Link>
     );
   }
 
-  renderLabel (id, bubble) {
+  renderBody (view) {
+    if (view.id !== 'accounts') {
+      return null;
+    }
+
+    return (
+      <Tooltip
+        className={ styles.tabbarTooltip }
+        text='navigate between the different parts and views of the application, switching between an account view, token view and distributed application view' />
+    );
+  }
+
+  renderLabelBody (id, bubble) {
     return (
       <div className={ styles.label }>
         <FormattedMessage
@@ -61,20 +79,21 @@ class Tab extends Component {
     );
   }
 
-  renderSignerLabel (id) {
+  renderLabel (id) {
     const { pendings } = this.props;
-    let bubble;
 
-    if (pendings) {
-      bubble = (
-        <Badge
-          color='red'
-          className={ styles.labelBubble }
-          value={ pendings } />
-      );
+    if (!pendings) {
+      return this.renderLabelBody(id);
     }
 
-    return this.renderLabel(id, bubble);
+    const bubble = (
+      <Badge
+        color='red'
+        className={ styles.labelBubble }
+        value={ pendings } />
+    );
+
+    return this.renderLabelBody(id, bubble);
   }
 }
 
@@ -86,13 +105,24 @@ class TabBar extends Component {
   static propTypes = {
     isTest: PropTypes.bool,
     netChain: PropTypes.string,
-    pending: PropTypes.array,
+    pendings: PropTypes.number,
     views: PropTypes.array.isRequired
   };
 
   static defaultProps = {
-    pending: []
+    pendings: 0
   };
+
+  shouldComponentUpdate (nextProps) {
+    const nextViews = nextProps.views.map((v) => v.id).sort();
+    const prevViews = this.props.views.map((v) => v.id).sort();
+
+    if (!isEqual(nextViews, prevViews)) {
+      return true;
+    }
+
+    return this.props.pendings !== nextProps.pendings;
+  }
 
   render () {
     return (
@@ -125,29 +155,16 @@ class TabBar extends Component {
   }
 
   renderTabs () {
-    const { views, pending } = this.props;
+    const { views, pendings } = this.props;
 
     const items = views
       .map((view, index) => {
-        const body = (view.id === 'accounts')
-          ? (
-            <Tooltip
-              className={ styles.tabbarTooltip }
-              text='navigate between the different parts and views of the application, switching between an account view, token view and distributed application view' />
-          )
-          : null;
-
         return (
-          <Link
-            activeClassName={ styles.tabactive }
-            className={ styles.tabLink }key={ view.id }
-            to={ view.route }>
-            <Tab
-              pendings={ pending.length }
-              view={ view }>
-              { body }
-            </Tab>
-          </Link>
+          <Tab
+            key={ view.id }
+            pendings={ view.id === 'signer' ? pendings : null }
+            view={ view }
+          />
         );
       });
 

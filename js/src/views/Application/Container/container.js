@@ -37,14 +37,17 @@ export default class Container extends Component {
     const { muiTheme } = this.context;
 
     return (
-      <ParityBackground className={ styles.container } muiTheme={ muiTheme }>
-        <FirstRun
-          visible={ showFirstRun }
-          onClose={ onCloseFirstRun } />
-        <Tooltips />
-        <Errors />
-        { children }
-      </ParityBackground>
+      <div className={ styles.container }>
+        <ParityBackground className={ styles.background } muiTheme={ muiTheme } />
+        <div className={ styles.content }>
+          <FirstRun
+            visible={ showFirstRun }
+            onClose={ onCloseFirstRun } />
+          <Tooltips />
+          <Errors />
+          { children }
+        </div>
+      </div>
     );
   }
 }

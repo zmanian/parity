@@ -16,6 +16,7 @@
 
 import React, { Component, PropTypes } from 'react';
 import { FlatButton } from 'material-ui';
+import { isEqual, pick } from 'lodash';
 
 import { nodeOrStringProptype } from '~/util/proptypes';
 
@@ -32,6 +33,15 @@ export default class Button extends Component {
 
   static defaultProps = {
     primary: true
+  }
+
+  shouldComponentUpdate (nextProps) {
+    if (typeof nextProps.label !== 'string') {
+      return true;
+    }
+
+    const keys = ['className', 'disabled', 'backgroundColor'];
+    return !isEqual(pick(this.props, keys), pick(nextProps, keys));
   }
 
   render () {

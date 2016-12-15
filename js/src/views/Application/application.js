@@ -45,7 +45,7 @@ class Application extends Component {
     children: PropTypes.node,
     netChain: PropTypes.string,
     isTest: PropTypes.bool,
-    pending: PropTypes.array,
+    pendings: PropTypes.number,
     blockNumber: PropTypes.object
   }
 
@@ -71,7 +71,7 @@ class Application extends Component {
   }
 
   renderApp () {
-    const { children, pending, netChain, isTest, blockNumber } = this.props;
+    const { children, pendings, netChain, isTest, blockNumber } = this.props;
 
     return (
       <Container
@@ -80,7 +80,8 @@ class Application extends Component {
         <TabBar
           netChain={ netChain }
           isTest={ isTest }
-          pending={ pending } />
+          pendings={ pendings }
+        />
         <div className={ styles.content }>
           { children }
         </div>
@@ -105,21 +106,17 @@ function mapStateToProps (state) {
   const { netChain, isTest, blockNumber } = state.nodeStatus;
   const { hasAccounts } = state.personal;
   const { pending } = state.signer;
+  const pendings = pending.length;
 
   return {
     hasAccounts,
     netChain,
     isTest,
-    pending,
+    pendings,
     blockNumber
   };
 }
 
-function mapDispatchToProps (dispatch) {
-  return bindActionCreators({}, dispatch);
-}
-
 export default connect(
-  mapStateToProps,
-  mapDispatchToProps
+  mapStateToProps
 )(Application);

@@ -46,7 +46,6 @@ export default class IdentityIconStore {
       return cachedScale;
     }
 
-console.warn('Creating identity icon for', address, scale);
     const icon = createIdentityImg(address, scale);
     this.icons[address][scale] = icon;
     return icon;

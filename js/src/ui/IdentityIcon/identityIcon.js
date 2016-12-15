@@ -18,8 +18,9 @@ import React, { Component, PropTypes } from 'react';
 import { connect } from 'react-redux';
 import ContractIcon from 'material-ui/svg-icons/action/code';
 
-import IdentityIconStore from './identityIconStore';
+import { nullableProptype } from '~/util/proptypes';
 
+import IdentityIconStore from './identityIconStore';
 import styles from './identityIcon.css';
 
 class IdentityIcon extends Component {
@@ -28,7 +29,7 @@ class IdentityIcon extends Component {
   }
 
   static propTypes = {
-    image: PropTypes.object.isRequired,
+    image: nullableProptype(PropTypes.string.isRequired),
 
     address: PropTypes.string,
     button: PropTypes.bool,
@@ -125,11 +126,11 @@ class IdentityIcon extends Component {
   }
 }
 
-function mapStateToProps (iniState) {
-  const { images } = iniState;
+function mapStateToProps (initState, initProps) {
+  const { images } = initState;
+  const image = images[initProps.address] || null;
 
-  return (state, props) => {
-    const image = images[props.address];
+  return () => {
     return { image };
   };
 }

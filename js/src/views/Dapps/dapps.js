@@ -120,11 +120,11 @@ export default class Dapps extends Component {
 
   renderApp = (app) => {
     return (
-      <div
+      <Summary
+        app={ app }
         className={ styles.item }
-        key={ app.id }>
-        <Summary app={ app } />
-      </div>
+        key={ app.id }
+      />
     );
   }
 
