@@ -16,7 +16,8 @@
 
 import React, { Component } from 'react';
 import IconButton from 'material-ui/IconButton';
-import ArrowUpwardIcon from 'material-ui/svg-icons/navigation/arrow-upward';
+
+import { UpIcon } from '~/ui/Icons';
 
 import { scrollTo } from './util';
 import styles from './ScrollTopButton.css';
@@ -46,7 +47,7 @@ export default class ScrollTopButton extends Component {
       <IconButton
         className={ `${styles.scrollButton} ${hiddenClass}` }
         onTouchTap={ this._scrollToTop }>
-        <ArrowUpwardIcon />
+        <UpIcon />
       </IconButton>
     );
   }

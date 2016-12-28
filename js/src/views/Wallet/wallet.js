@@ -19,14 +19,10 @@ import { connect } from 'react-redux';
 import { bindActionCreators } from 'redux';
 import moment from 'moment';
 
-import ContentCreate from 'material-ui/svg-icons/content/create';
-import ActionDelete from 'material-ui/svg-icons/action/delete';
-import ContentSend from 'material-ui/svg-icons/content/send';
-import SettingsIcon from 'material-ui/svg-icons/action/settings';
-
 import { nullableProptype } from '~/util/proptypes';
 import { EditMeta, Transfer, WalletSettings } from '~/modals';
 import { Actionbar, Button, Page, Loading } from '~/ui';
+import { CreateIcon, DeleteIcon, SendIcon, SettingsIcon } from '~/ui/Icons';
 
 import Delete from '../Address/Delete';
 import Header from '../Account/Header';
@@ -215,18 +211,18 @@ class Wallet extends Component {
     const buttons = [
       <Button
         key='transferFunds'
-        icon={ <ContentSend /> }
+        icon={ <SendIcon /> }
         label='transfer'
         disabled={ !showTransferButton }
         onClick={ this.onTransferClick } />,
       <Button
         key='delete'
-        icon={ <ActionDelete /> }
+        icon={ <DeleteIcon /> }
         label='delete'
         onClick={ this.showDeleteDialog } />,
       <Button
         key='editmeta'
-        icon={ <ContentCreate /> }
+        icon={ <CreateIcon /> }
         label='edit'
         onClick={ this.onEditClick } />,
       <Button

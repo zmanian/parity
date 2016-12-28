@@ -15,11 +15,9 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 import React, { Component, PropTypes } from 'react';
-import Refresh from 'material-ui/svg-icons/navigation/refresh';
-import Close from 'material-ui/svg-icons/navigation/close';
-import Subdirectory from 'material-ui/svg-icons/navigation/subdirectory-arrow-left';
 
 import { Button } from '~/ui';
+import { CloseIcon, RefreshIcon, SubdirectoryIcon } from '~/ui/Icons';
 
 const KEY_ESC = 27;
 const KEY_ENTER = 13;
@@ -61,19 +59,20 @@ export default class AddressBar extends Component {
         <Button
           disabled={ isLoading }
           onClick={ this.onGo }
-          icon={ isLoading ? <Close /> : <Refresh /> }
-          />
+          icon={
+            isLoading
+              ? <CloseIcon />
+              : <RefreshIcon />
+          } />
         <input
           onChange={ this.onUpdateUrl }
           onKeyDown={ this.onKey }
           type='text'
-          value={ currentUrl }
-          />
+          value={ currentUrl } />
         <Button
           disabled={ isPristine }
           onClick={ this.onGo }
-          icon={ <Subdirectory /> }
-          />
+          icon={ <SubdirectoryIcon /> } />
       </div>
     );
   }

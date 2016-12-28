@@ -16,7 +16,7 @@
 
 import React, { Component, PropTypes } from 'react';
 
-import BackIcon from 'material-ui/svg-icons/navigation/arrow-back';
+import { BackIcon } from '~/ui/Icons';
 
 import TransactionPendingFormConfirm from './TransactionPendingFormConfirm';
 import TransactionPendingFormReject from './TransactionPendingFormReject';

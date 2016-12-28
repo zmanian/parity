@@ -19,12 +19,21 @@ import CancelIcon from 'material-ui/svg-icons/content/clear';
 import CheckIcon from 'material-ui/svg-icons/navigation/check';
 import CloseIcon from 'material-ui/svg-icons/navigation/close';
 import ContractIcon from 'material-ui/svg-icons/action/code';
+import CreateIcon from 'material-ui/svg-icons/content/create';
+import DeleteIcon from 'material-ui/svg-icons/action/delete';
 import DoneIcon from 'material-ui/svg-icons/action/done-all';
-import LockedIcon from 'material-ui/svg-icons/action/lock-outline';
+import ListIcon from 'material-ui/svg-icons/action/view-list';
+import LockedIcon from 'material-ui/svg-icons/action/lock';
 import NextIcon from 'material-ui/svg-icons/navigation/arrow-forward';
 import PrevIcon from 'material-ui/svg-icons/navigation/arrow-back';
+import RefreshIcon from 'material-ui/svg-icons/navigation/refresh';
 import SaveIcon from 'material-ui/svg-icons/content/save';
+import SendIcon from 'material-ui/svg-icons/content/send';
+import SettingsIcon from 'material-ui/svg-icons/action/settings';
 import SnoozeIcon from 'material-ui/svg-icons/av/snooze';
+import SubdirectoryIcon from 'material-ui/svg-icons/navigation/subdirectory-arrow-left';
+import UpIcon from 'material-ui/svg-icons/navigation/arrow-upward';
+import VerifyIcon from 'material-ui/svg-icons/action/verified-user';
 import VisibleIcon from 'material-ui/svg-icons/image/remove-red-eye';
 
 export {
@@ -33,11 +42,20 @@ export {
   CheckIcon,
   CloseIcon,
   ContractIcon,
+  CreateIcon,
+  DeleteIcon,
   DoneIcon,
+  ListIcon,
   LockedIcon,
   NextIcon,
   PrevIcon,
+  RefreshIcon,
   SaveIcon,
+  SendIcon,
+  SettingsIcon,
   SnoozeIcon,
+  SubdirectoryIcon,
+  UpIcon,
+  VerifyIcon,
   VisibleIcon
 };

@@ -17,14 +17,10 @@
 import React, { Component, PropTypes } from 'react';
 import { connect } from 'react-redux';
 import { bindActionCreators } from 'redux';
-import ActionDelete from 'material-ui/svg-icons/action/delete';
-import ContentCreate from 'material-ui/svg-icons/content/create';
-import ContentSend from 'material-ui/svg-icons/content/send';
-import LockIcon from 'material-ui/svg-icons/action/lock';
-import VerifyIcon from 'material-ui/svg-icons/action/verified-user';
 
 import { EditMeta, DeleteAccount, Shapeshift, Verification, Transfer, PasswordManager } from '~/modals';
 import { Actionbar, Button, Page } from '~/ui';
+import { CreateIcon, DeleteIcon, LockedIcon, SendIcon, VerifyIcon } from '~/ui/Icons';
 
 import shapeshiftBtn from '~/../assets/images/shapeshift-btn.png';
 
@@ -124,7 +120,7 @@ class Account extends Component {
     const buttons = [
       <Button
         key='transferFunds'
-        icon={ <ContentSend /> }
+        icon={ <SendIcon /> }
         label='transfer'
         disabled={ !showTransferButton }
         onClick={ this.onTransferClick } />,
@@ -140,17 +136,17 @@ class Account extends Component {
         onClick={ this.openVerification } />,
       <Button
         key='editmeta'
-        icon={ <ContentCreate /> }
+        icon={ <CreateIcon /> }
         label='edit'
         onClick={ this.onEditClick } />,
       <Button
         key='passwordManager'
-        icon={ <LockIcon /> }
+        icon={ <LockedIcon /> }
         label='password'
         onClick={ this.onPasswordClick } />,
       <Button
         key='delete'
-        icon={ <ActionDelete /> }
+        icon={ <DeleteIcon /> }
         label='delete account'
         onClick={ this.onDeleteClick } />
     ];

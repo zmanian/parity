@@ -17,12 +17,12 @@
 import React, { Component, PropTypes } from 'react';
 import { connect } from 'react-redux';
 import { bindActionCreators } from 'redux';
-import ContentAdd from 'material-ui/svg-icons/content/add';
 import { uniq, isEqual } from 'lodash';
 
 import List from './List';
 import { CreateAccount, CreateWallet } from '~/modals';
 import { Actionbar, ActionbarExport, ActionbarSearch, ActionbarSort, Button, Page, Tooltip } from '~/ui';
+import { AddIcon } from '~/ui/Icons';
 import { setVisibleAccounts } from '~/redux/providers/personalActions';
 
 import styles from './accounts.css';
@@ -192,13 +192,13 @@ class Accounts extends Component {
     const buttons = [
       <Button
         key='newAccount'
-        icon={ <ContentAdd /> }
+        icon={ <AddIcon /> }
         label='new account'
         onClick={ this.onNewAccountClick } />,
 
       <Button
         key='newWallet'
-        icon={ <ContentAdd /> }
+        icon={ <AddIcon /> }
         label='new wallet'
         onClick={ this.onNewWalletClick } />,
 

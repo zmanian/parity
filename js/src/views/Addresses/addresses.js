@@ -17,13 +17,13 @@
 import React, { Component, PropTypes } from 'react';
 import { connect } from 'react-redux';
 import { bindActionCreators } from 'redux';
-import ContentAdd from 'material-ui/svg-icons/content/add';
 import { uniq, isEqual } from 'lodash';
 
 import List from '../Accounts/List';
 import Summary from '../Accounts/Summary';
 import { AddAddress } from '~/modals';
 import { Actionbar, ActionbarExport, ActionbarImport, ActionbarSearch, ActionbarSort, Button, Page, Loading } from '~/ui';
+import { AddIcon } from '~/ui/Icons';
 import { setVisibleAccounts } from '~/redux/providers/personalActions';
 
 import styles from './addresses.css';
@@ -139,7 +139,7 @@ class Addresses extends Component {
     const buttons = [
       <Button
         key='newAddress'
-        icon={ <ContentAdd /> }
+        icon={ <AddIcon /> }
         label='new address'
         onClick={ this.onOpenAdd } />,
 

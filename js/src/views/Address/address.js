@@ -17,12 +17,10 @@
 import React, { Component, PropTypes } from 'react';
 import { connect } from 'react-redux';
 import { bindActionCreators } from 'redux';
-import ActionDelete from 'material-ui/svg-icons/action/delete';
-import ContentCreate from 'material-ui/svg-icons/content/create';
-import ContentAdd from 'material-ui/svg-icons/content/add';
 
 import { EditMeta, AddAddress } from '~/modals';
 import { Actionbar, Button, Page } from '~/ui';
+import { AddIcon, CreateIcon, DeleteIcon } from '~/ui/Icons';
 
 import Header from '../Account/Header';
 import Transactions from '../Account/Transactions';
@@ -145,12 +143,12 @@ class Address extends Component {
     const buttons = [
       <Button
         key='editmeta'
-        icon={ <ContentCreate /> }
+        icon={ <CreateIcon /> }
         label='edit'
         onClick={ this.onEditClick } />,
       <Button
         key='delete'
-        icon={ <ActionDelete /> }
+        icon={ <DeleteIcon /> }
         label='delete address'
         onClick={ this.showDeleteDialog } />
     ];
@@ -158,7 +156,7 @@ class Address extends Component {
     const addToBook = (
       <Button
         key='newAddress'
-        icon={ <ContentAdd /> }
+        icon={ <AddIcon /> }
         label='save address'
         onClick={ this.onOpenAdd }
       />
