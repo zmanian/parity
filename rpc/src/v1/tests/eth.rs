@@ -15,62 +15,58 @@
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
 //! rpc integration tests.
-use std::sync::Arc;
-use std::time::Duration;
+
+use devtools::RandomTempPath;
+use ethcore::account_provider::AccountProvider;
+use ethcore::block::Block;
 
 use ethcore::client::{BlockChainClient, Client, ClientConfig};
-use ethcore::ids::BlockId;
-use ethcore::spec::{Genesis, Spec};
-use ethcore::block::Block;
-use ethcore::views::BlockView;
 use ethcore::ethereum;
+use ethcore::ids::BlockId;
 use ethcore::miner::{MinerOptions, Banning, GasPricer, MinerService, ExternalMiner, Miner, PendingSet, PrioritizationStrategy, GasLimit};
-use ethcore::account_provider::AccountProvider;
-use devtools::RandomTempPath;
-use util::Hashable;
-use io::IoChannel;
-use util::{U256, H256, Uint, Address};
-use jsonrpc_core::{IoHandler, GenericIoHandler};
+use ethcore::spec::{Genesis, Spec};
+use ethcore::views::BlockView;
 use ethjson::blockchain::BlockChain;
+use io::IoChannel;
+use jsonrpc_core::{IoHandler, GenericIoHandler};
+use std::sync::Arc;
+use std::time::Duration;
+use util::{U256, H256, Uint, Address};
+use util::Hashable;
 
 use v1::impls::{EthClient, SigningUnsafeClient};
-use v1::types::U256 as NU256;
+use v1::tests::helpers::{TestSnapshotService, TestSyncProvider, Config};
 use v1::traits::eth::Eth;
 use v1::traits::eth_signing::EthSigning;
-use v1::tests::helpers::{TestSnapshotService, TestSyncProvider, Config};
+use v1::types::U256 as NU256;
 
 fn account_provider() -> Arc<AccountProvider> {
 	Arc::new(AccountProvider::transient_provider())
 }
 
 fn sync_provider() -> Arc<TestSyncProvider> {
-	Arc::new(TestSyncProvider::new(Config {
-		network_id: 3,
-		num_peers: 120,
-	}))
+	Arc::new(TestSyncProvider::new(Config { network_id: 3, num_peers: 120 }))
 }
 
 fn miner_service(spec: &Spec, accounts: Arc<AccountProvider>) -> Arc<Miner> {
-	Miner::new(
-		MinerOptions {
-			new_work_notify: vec![],
-			force_sealing: true,
-			reseal_on_external_tx: true,
-			reseal_on_own_tx: true,
-			tx_queue_size: 1024,
-			tx_gas_limit: !U256::zero(),
-			tx_queue_strategy: PrioritizationStrategy::GasPriceOnly,
-			tx_queue_gas_limit: GasLimit::None,
-			tx_queue_banning: Banning::Disabled,
-			pending_set: PendingSet::SealingOrElseQueue,
-			reseal_min_period: Duration::from_secs(0),
-			work_queue_size: 50,
-			enable_resubmission: true,
-		},
-		GasPricer::new_fixed(20_000_000_000u64.into()),
-		&spec,
-		Some(accounts),
-	)
+	Miner::new(MinerOptions {
+		           new_work_notify: vec![],
+		           force_sealing: true,
+		           reseal_on_external_tx: true,
+		           reseal_on_own_tx: true,
+		           tx_queue_size: 1024,
+		           tx_gas_limit: !U256::zero(),
+		           tx_queue_strategy: PrioritizationStrategy::GasPriceOnly,
+		           tx_queue_gas_limit: GasLimit::None,
+		           tx_queue_banning: Banning::Disabled,
+		           pending_set: PendingSet::SealingOrElseQueue,
+		           reseal_min_period: Duration::from_secs(0),
+		           work_queue_size: 50,
+		           enable_resubmission: true,
+	           },
+	           GasPricer::new_fixed(20_000_000_000u64.into()),
+	           &spec,
+	           Some(accounts))
 }
 
 fn snapshot_service() -> Arc<TestSnapshotService> {
@@ -121,31 +117,12 @@ impl EthTester {
 		let snapshot_service = snapshot_service();
 
 		let db_config = ::util::kvdb::DatabaseConfig::with_columns(::ethcore::db::NUM_COLUMNS);
-		let client = Client::new(
-			ClientConfig::default(),
-			&spec,
-			dir.as_path(),
-			miner_service.clone(),
-			IoChannel::disconnected(),
-			&db_config
-		).unwrap();
+		let client = Client::new(ClientConfig::default(), &spec, dir.as_path(), miner_service.clone(), IoChannel::disconnected(), &db_config).unwrap();
 		let sync_provider = sync_provider();
 		let external_miner = Arc::new(ExternalMiner::default());
 
-		let eth_client = EthClient::new(
-			&client,
-			&snapshot_service,
-			&sync_provider,
-			&account_provider,
-			&miner_service,
-			&external_miner,
-			Default::default(),
-		);
-		let eth_sign = SigningUnsafeClient::new(
-			&client,
-			&account_provider,
-			&miner_service
-		);
+		let eth_client = EthClient::new(&client, &snapshot_service, &sync_provider, &account_provider, &miner_service, &external_miner, Default::default());
+		let eth_sign = SigningUnsafeClient::new(&client, &account_provider, &miner_service);
 
 		let handler = IoHandler::new();
 		handler.add_delegate(eth_client.to_delegate());
@@ -252,6 +229,7 @@ const TRANSACTION_COUNT_SPEC: &'static [u8] = br#"{
 		"0000000000000000000000000000000000000002": { "builtin": { "name": "sha256", "pricing": { "linear": { "base": 60, "word": 12 } } } },
 		"0000000000000000000000000000000000000003": { "builtin": { "name": "ripemd160", "pricing": { "linear": { "base": 600, "word": 120 } } } },
 		"0000000000000000000000000000000000000004": { "builtin": { "name": "identity", "pricing": { "linear": { "base": 15, "word": 3 } } } },
+		"0000000000000000000000000000000000000005": { "builtin": { "name": "blake3b", "pricing": { "linear": { "base": 60, "word": 12 } } } },
 		"faa34835af5c2ea724333018a515fbb7d5bc0b33": { "balance": "10000000000000", "nonce": "0" }
 	}
 }
@@ -315,7 +293,9 @@ fn eth_transaction_count() {
 	let req_before = r#"{
 		"jsonrpc": "2.0",
 		"method": "eth_getTransactionCount",
-		"params": [""#.to_owned() + format!("0x{:?}", address).as_ref() + r#"", "latest"],
+		"params": [""#
+	.to_owned() + format!("0x{:?}", address).as_ref() +
+	                 r#"", "latest"],
 		"id": 15
 	}"#;
 
@@ -327,7 +307,9 @@ fn eth_transaction_count() {
 		"jsonrpc": "2.0",
 		"method": "eth_sendTransaction",
 		"params": [{
-			"from": ""#.to_owned() + format!("0x{:?}", address).as_ref() + r#"",
+			"from": ""#
+	.to_owned() + format!("0x{:?}", address).as_ref() +
+	                     r#"",
 			"to": "0xd46e8dd67c5d32be8058bb8eb970870f07244567",
 			"gas": "0x30000",
 			"gasPrice": "0x1",
@@ -343,7 +325,9 @@ fn eth_transaction_count() {
 	let req_after_latest = r#"{
 		"jsonrpc": "2.0",
 		"method": "eth_getTransactionCount",
-		"params": [""#.to_owned() + format!("0x{:?}", address).as_ref() + r#"", "latest"],
+		"params": [""#
+	.to_owned() + format!("0x{:?}", address).as_ref() +
+	                       r#"", "latest"],
 		"id": 17
 	}"#;
 
@@ -355,7 +339,9 @@ fn eth_transaction_count() {
 	let req_after_pending = r#"{
 		"jsonrpc": "2.0",
 		"method": "eth_getTransactionCount",
-		"params": [""#.to_owned() + format!("0x{:?}", address).as_ref() + r#"", "pending"],
+		"params": [""#
+	.to_owned() + format!("0x{:?}", address).as_ref() +
+	                        r#"", "pending"],
 		"id": 18
 	}"#;
 
@@ -381,15 +367,15 @@ fn verify_transaction_counts(name: String, chain: BlockChain) {
 			"jsonrpc": "2.0",
 			"method": "eth_getBlockTransactionCountByHash",
 			"params": [
-				""#.to_owned() + format!("0x{:?}", hash).as_ref() + r#""
+				""#
+		.to_owned() + format!("0x{:?}", hash).as_ref() +
+		          r#""
 			],
-			"id": "# + format!("{}", *id).as_ref() + r#"
+			"id": "# + format!("{}", *id).as_ref() +
+		          r#"
 		}"#;
 
-		let res = r#"{"jsonrpc":"2.0","result":""#.to_owned()
-			+ format!("0x{:x}", count).as_ref()
-			+ r#"","id":"#
-			+ format!("{}", *id).as_ref() + r#"}"#;
+		let res = r#"{"jsonrpc":"2.0","result":""#.to_owned() + format!("0x{:x}", count).as_ref() + r#"","id":"# + format!("{}", *id).as_ref() + r#"}"#;
 		*id += 1;
 		(req, res)
 	}
@@ -399,15 +385,15 @@ fn verify_transaction_counts(name: String, chain: BlockChain) {
 			"jsonrpc": "2.0",
 			"method": "eth_getBlockTransactionCountByNumber",
 			"params": [
-				"#.to_owned() + &::serde_json::to_string(&NU256::from(num)).unwrap() + r#"
+				"#
+		.to_owned() + &::serde_json::to_string(&NU256::from(num)).unwrap() +
+		          r#"
 			],
-			"id": "# + format!("{}", *id).as_ref() + r#"
+			"id": "# + format!("{}", *id).as_ref() +
+		          r#"
 		}"#;
 
-		let res = r#"{"jsonrpc":"2.0","result":""#.to_owned()
-			+ format!("0x{:x}", count).as_ref()
-			+ r#"","id":"#
-			+ format!("{}", *id).as_ref() + r#"}"#;
+		let res = r#"{"jsonrpc":"2.0","result":""#.to_owned() + format!("0x{:x}", count).as_ref() + r#"","id":"# + format!("{}", *id).as_ref() + r#"}"#;
 		*id += 1;
 		(req, res)
 	}
@@ -437,15 +423,18 @@ fn starting_nonce_test() {
 	let tester = EthTester::from_spec(Spec::load(POSITIVE_NONCE_SPEC).expect("invalid chain spec"));
 	let address = Address::from(10);
 
-	let sample = tester.handler.handle_request_sync(&(r#"
+	let sample = tester.handler
+	.handle_request_sync(&(r#"
 		{
 			"jsonrpc": "2.0",
 			"method": "eth_getTransactionCount",
-			"params": [""#.to_owned() + format!("0x{:?}", address).as_ref() + r#"", "latest"],
+			"params": [""#
+	.to_owned() + format!("0x{:?}", address).as_ref() +
+	                       r#"", "latest"],
 			"id": 15
 		}
-		"#)
-	).unwrap();
+		"#))
+	.unwrap();
 
 	assert_eq!(r#"{"jsonrpc":"2.0","result":"0x100","id":15}"#, &sample);
 }

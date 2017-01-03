@@ -103,6 +103,7 @@ extern crate ethcore_bloom_journal as bloom_journal;
 extern crate byteorder;
 extern crate transient_hashmap;
 extern crate linked_hash_map;
+extern crate blake2_rfc;
 
 #[macro_use]
 extern crate log;
@@ -140,7 +141,8 @@ pub mod snapshot;
 pub mod action_params;
 pub mod db;
 pub mod verification;
-#[macro_use] pub mod evm;
+#[macro_use]
+pub mod evm;
 
 mod cache_manager;
 mod blooms;
@@ -163,5 +165,5 @@ mod tests;
 #[cfg(feature="json-tests")]
 mod json_tests;
 
-pub use types::*;
 pub use executive::contract_address;
+pub use types::*;

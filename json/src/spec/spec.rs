@@ -16,10 +16,10 @@
 
 //! Spec deserialization.
 
-use std::io::Read;
 use serde_json;
 use serde_json::Error;
 use spec::{Params, Genesis, Engine, State};
+use std::io::Read;
 
 /// Spec deserialization.
 #[derive(Debug, PartialEq, Deserialize)]
@@ -43,7 +43,9 @@ pub struct Spec {
 
 impl Spec {
 	/// Loads test from json.
-	pub fn load<R>(reader: R) -> Result<Self, Error> where R: Read {
+	pub fn load<R>(reader: R) -> Result<Self, Error>
+		where R: Read,
+	{
 		serde_json::from_reader(reader)
 	}
 }
@@ -105,6 +107,7 @@ mod tests {
 		"0000000000000000000000000000000000000002": { "balance": "1", "nonce": "1048576", "builtin": { "name": "sha256", "pricing": { "linear": { "base": 60, "word": 12 } } } },
 		"0000000000000000000000000000000000000003": { "balance": "1", "nonce": "1048576", "builtin": { "name": "ripemd160", "pricing": { "linear": { "base": 600, "word": 120 } } } },
 		"0000000000000000000000000000000000000004": { "balance": "1", "nonce": "1048576", "builtin": { "name": "identity", "pricing": { "linear": { "base": 15, "word": 3 } } } },
+		"0000000000000000000000000000000000000005": { "builtin": { "name": "blake2b", "pricing": { "linear": { "base": 60, "word": 12 } } } },
 		"102e61f5d8f9bc71d0ad4a084df4e65e05ce0e1c": { "balance": "1606938044258990275541962092341162602522202993782792835301376", "nonce": "1048576" }
 	}
 		}"#;

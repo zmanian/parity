@@ -14,13 +14,14 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-use crypto::sha2::Sha256 as Sha256Digest;
-use crypto::ripemd160::Ripemd160 as Ripemd160Digest;
+use blake2_rfc::blake2b::Blake2b as Blake2bDigest;
 use crypto::digest::Digest;
+use crypto::ripemd160::Ripemd160 as Ripemd160Digest;
+use crypto::sha2::Sha256 as Sha256Digest;
+use ethjson;
+use ethkey::{Signature, recover as ec_recover};
 use std::cmp::min;
 use util::{U256, H256, Hashable, FixedHash, BytesRef};
-use ethkey::{Signature, recover as ec_recover};
-use ethjson;
 
 /// Native implementation of a built-in contract.
 pub trait Impl: Send + Sync {
@@ -54,10 +55,14 @@ pub struct Builtin {
 
 impl Builtin {
 	/// Simple forwarder for cost.
-	pub fn cost(&self, s: usize) -> U256 { self.pricer.cost(s) }
+	pub fn cost(&self, s: usize) -> U256 {
+		self.pricer.cost(s)
+	}
 
 	/// Simple forwarder for execute.
-	pub fn execute(&self, input: &[u8], output: &mut BytesRef) { self.native.execute(input, output) }
+	pub fn execute(&self, input: &[u8], output: &mut BytesRef) {
+		self.native.execute(input, output)
+	}
 }
 
 impl From<ethjson::spec::Builtin> for Builtin {
@@ -85,6 +90,7 @@ fn ethereum_builtin(name: &str) -> Box<Impl> {
 		"ecrecover" => Box::new(EcRecover) as Box<Impl>,
 		"sha256" => Box::new(Sha256) as Box<Impl>,
 		"ripemd160" => Box::new(Ripemd160) as Box<Impl>,
+		"blake2b" => Box::new(Blake2b) as Box<Impl>,
 		_ => panic!("invalid builtin name: {}", name),
 	}
 }
@@ -107,6 +113,9 @@ struct Sha256;
 
 #[derive(Debug)]
 struct Ripemd160;
+
+#[derive(Debug)]
+struct Blake2b;
 
 impl Impl for Identity {
 	fn execute(&self, input: &[u8], output: &mut BytesRef) {
@@ -165,11 +174,22 @@ impl Impl for Ripemd160 {
 		output.write(0, &out);
 	}
 }
+impl Impl for Blake2b {
+	fn execute(&self, input: &[u8], output: &mut BytesRef) {
+		let mut blake2 = Blake2bDigest::new(64);
+		blake2.update(input);
+
+		let hash = blake2.finalize();
+
+
+		output.write(0, hash.as_bytes());
+	}
+}
 
 #[cfg(test)]
 mod tests {
-	use super::{Builtin, Linear, ethereum_builtin, Pricer};
 	use ethjson;
+	use super::{Builtin, Linear, ethereum_builtin, Pricer};
 	use util::{U256, BytesRef};
 
 	#[test]
@@ -239,13 +259,13 @@ mod tests {
 	#[test]
 	fn ecrecover() {
 		use rustc_serialize::hex::FromHex;
-		/*let k = KeyPair::from_secret(b"test".sha3()).unwrap();
-		let a: Address = From::from(k.public().sha3());
-		println!("Address: {}", a);
-		let m = b"hello world".sha3();
-		println!("Message: {}", m);
-		let s = k.sign(&m).unwrap();
-		println!("Signed: {}", s);*/
+		// let k = KeyPair::from_secret(b"test".sha3()).unwrap();
+		// let a: Address = From::from(k.public().sha3());
+		// println!("Address: {}", a);
+		// let m = b"hello world".sha3();
+		// println!("Message: {}", m);
+		// let s = k.sign(&m).unwrap();
+		// println!("Signed: {}", s);
 
 		let f = ethereum_builtin("ecrecover");
 
@@ -289,11 +309,37 @@ mod tests {
 		assert_eq!(&o[..], &(FromHex::from_hex("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff").unwrap())[..]);
 
 		// TODO: Should this (corrupted version of the above) fail rather than returning some address?
-	/*	let i_bad = FromHex::from_hex("48173285a8d7341e5e972fc677286384f802f8ef42a5ec5f03bbfa254cb01fad000000000000000000000000000000000000000000000000000000000000001b650acf9d3f5f0a2c799776a1254355d5f4061762a237396a99a0e0e3fc2bcd6729514a0dacb2e623ac4abd157cb18163ff942280db4d5caad66ddf941ba12e03").unwrap();
-		let mut o = [255u8; 32];
-		f.execute(&i_bad[..], &mut BytesRef::Fixed(&mut o[..]));
-		assert_eq!(&o[..], &(FromHex::from_hex("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff").unwrap())[..]);*/
+		// 	let i_bad = FromHex::from_hex("48173285a8d7341e5e972fc677286384f802f8ef42a5ec5f03bbfa254cb01fad000000000000000000000000000000000000000000000000000000000000001b650acf9d3f5f0a2c799776a1254355d5f4061762a237396a99a0e0e3fc2bcd6729514a0dacb2e623ac4abd157cb18163ff942280db4d5caad66ddf941ba12e03").unwrap();
+		// let mut o = [255u8; 32];
+		// f.execute(&i_bad[..], &mut BytesRef::Fixed(&mut o[..]));
+		// assert_eq!(&o[..], &(FromHex::from_hex("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff").unwrap())[..]);
 	}
+
+	#[test]
+	fn blake2b() {
+		use rustc_serialize::hex::FromHex;
+		let f = ethereum_builtin("blake2b");
+
+		let i = [0u8; 0];
+
+		let mut o = [255u8; 64];
+		f.execute(&i[..], &mut BytesRef::Fixed(&mut o[..]));
+		assert_eq!(&o[..], &(FromHex::from_hex("786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce").unwrap())[..]);
+
+		let mut o8 = [255u8; 8];
+		f.execute(&i[..], &mut BytesRef::Fixed(&mut o8[..]));
+		assert_eq!(&o8[..], &(FromHex::from_hex("786a02f742015903").unwrap())[..]);
+
+		let mut o34 = [255u8; 34];
+		f.execute(&i[..], &mut BytesRef::Fixed(&mut o34[..]));
+		assert_eq!(&o34[..], &(FromHex::from_hex("786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e").unwrap())[..]);
+
+		let mut ov = vec![];
+		f.execute(&i[..], &mut BytesRef::Flexible(&mut ov));
+		assert_eq!(&ov[..], &(FromHex::from_hex("786a02f742015903c6c6fd852552d272912f4740e15847618a86e217f71f5419d25e1031afee585313896444934eb04b903a685b1448b755d56f701afe9be2ce").unwrap())[..]);
+	}
+
+
 
 	#[test]
 	#[should_panic]
@@ -324,10 +370,7 @@ mod tests {
 	fn from_json() {
 		let b = Builtin::from(ethjson::spec::Builtin {
 			name: "identity".to_owned(),
-			pricing: ethjson::spec::Pricing::Linear(ethjson::spec::Linear {
-				base: 10,
-				word: 20,
-			})
+			pricing: ethjson::spec::Pricing::Linear(ethjson::spec::Linear { base: 10, word: 20 }),
 		});
 
 		assert_eq!(b.cost(0), U256::from(10));

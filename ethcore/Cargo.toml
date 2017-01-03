@@ -1,63 +1,94 @@
 [package]
+authors = ["Parity Technologies <admin@parity.io>"]
+build = "build.rs"
 description = "Ethcore library"
 homepage = "http://parity.io"
 license = "GPL-3.0"
 name = "ethcore"
 version = "1.5.0"
-authors = ["Parity Technologies <admin@parity.io>"]
-build = "build.rs"
 
 [build-dependencies]
-"ethcore-ipc-codegen" = { path = "../ipc/codegen" }
+
+[build-dependencies.ethcore-ipc-codegen]
+path = "../ipc/codegen"
 
 [dependencies]
-log = "0.3"
-env_logger = "0.3"
-rustc-serialize = "0.3"
-heapsize = "0.3"
-rust-crypto = "0.2.34"
-num_cpus = "0.2"
-crossbeam = "0.2.9"
-lazy_static = "0.2"
-bloomchain = "0.1"
-rayon = "0.4.2"
-semver = "0.5"
 bit-set = "0.4"
-time = "0.1"
-rand = "0.3"
+blake2-rfc = "0.2.17"
+bloomchain = "0.1"
 byteorder = "0.5"
-transient-hashmap = "0.1"
-linked-hash-map = "0.3.0"
-evmjit = { path = "../evmjit", optional = true }
-clippy = { version = "0.0.103", optional = true}
-ethash = { path = "../ethash" }
-ethcore-util = { path = "../util" }
-ethcore-io = { path = "../util/io" }
-ethcore-devtools = { path = "../devtools" }
-ethjson = { path = "../json" }
-ethcore-ipc = { path = "../ipc/rpc" }
-ethstore = { path = "../ethstore" }
-ethkey = { path = "../ethkey" }
-ethcore-ipc-nano = { path = "../ipc/nano" }
-rlp = { path = "../util/rlp" }
-lru-cache = "0.1.0"
-ethcore-bloom-journal = { path = "../util/bloom" }
+crossbeam = "0.2.9"
+env_logger = "0.3"
 ethabi = "0.2.2"
+heapsize = "0.3"
+lazy_static = "0.2"
+linked-hash-map = "0.3.0"
+log = "0.3"
+lru-cache = "0.1.0"
+num_cpus = "0.2"
+rand = "0.3"
+rayon = "0.4.2"
+rust-crypto = "0.2.34"
+rustc-serialize = "0.3"
+semver = "0.5"
+time = "0.1"
+transient-hashmap = "0.1"
+
+[dependencies.clippy]
+optional = true
+version = "0.0.103"
+
+[dependencies.ethash]
+path = "../ethash"
+
+[dependencies.ethcore-bloom-journal]
+path = "../util/bloom"
+
+[dependencies.ethcore-devtools]
+path = "../devtools"
+
+[dependencies.ethcore-io]
+path = "../util/io"
+
+[dependencies.ethcore-ipc]
+path = "../ipc/rpc"
+
+[dependencies.ethcore-ipc-nano]
+path = "../ipc/nano"
+
+[dependencies.ethcore-util]
+path = "../util"
+
+[dependencies.ethjson]
+path = "../json"
+
+[dependencies.ethkey]
+path = "../ethkey"
+
+[dependencies.ethstore]
+path = "../ethstore"
+
+[dependencies.evmjit]
+optional = true
+path = "../evmjit"
 
 [dependencies.hyper]
-git = "https://github.com/ethcore/hyper"
 default-features = false
+git = "https://github.com/ethcore/hyper"
+
+[dependencies.rlp]
+path = "../util/rlp"
 
 [features]
-jit = ["evmjit"]
-evm-debug = ["slow-blocks"]
-evm-debug-tests = ["evm-debug"]
-slow-blocks = [] # Use SLOW_TX_DURATION="50" (compile time!) to track transactions over 50ms
-json-tests = []
-test-heavy = []
-dev = ["clippy"]
-default = []
 benches = []
-ipc = []
+default = []
+dev = ["clippy"]
 ethkey-cli = ["ethkey/cli"]
 ethstore-cli = ["ethstore/cli"]
+evm-debug = ["slow-blocks"]
+evm-debug-tests = ["evm-debug"]
+ipc = []
+jit = ["evmjit"]
+json-tests = []
+slow-blocks = []
+test-heavy = []
